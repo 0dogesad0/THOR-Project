@@ -2,7 +2,51 @@
 
 Chat AI de coding **100% offline e portátil** para Windows — estilo opencode/Cursor. Sem internet, sem instalações, sem contas.
 
-Copia a pasta para qualquer PC Windows (ou pen USB) e corre `start.bat`.
+> **A chegar do GitHub?** Este repo contém só o código (~50 KB). Para funcionar faltam 2 coisas: os **runtimes** (release v1.0) e o **modelo IA** — as instruções completas estão em [Instalação do zero](#instalação-do-zero-vindo-do-github).
+
+---
+
+## Instalação do zero (vindo do GitHub)
+
+Tudo o que falta para o Thor ficar a funcionar — são **2 downloads** além do código:
+
+### 1. Descarregar o código
+
+- Na página do repo: botão verde **Code → Download ZIP**, ou `git clone <url-do-repo>`
+- Extrai/entra na pasta do projeto
+
+### 2. Descarregar os runtimes (release v1.0)
+
+Na página do repo, vai a **Releases → v1.0 → Assets** e descarrega os ficheiros:
+
+| Asset (zip) | Contém | Onde extrair |
+|---|---|---|
+| `runtime…zip` | llama.cpp CPU **+ Python portátil** | pasta `runtime/` (obrigatório — sem ele nada corre) |
+| `runtime-gpu…zip` | llama.cpp CUDA (NVIDIA) | pasta `runtime-gpu/` (opcional) |
+| `runtime-vulkan…zip` | llama.cpp Vulkan (AMD/Intel) | pasta `runtime-vulkan/` (opcional) |
+
+Como extrair: cria a pasta correspondente dentro do projeto e descompacta **o conteúdo do zip lá dentro** — no fim tens `runtime\llama-server.exe`, `runtime\python.exe`, etc.
+
+- **Mínimo para funcionar**: só o `runtime` (CPU) — corre em qualquer PC Windows.
+- **Com GPU**: extrai também os outros dois — o chat escolhe sozinho (CUDA → Vulkan → CPU).
+- Sem Python nenhum instalado? O `runtime` traz o Python portátil; se o teu zip não o incluir, instala [Python 3.12+](https://www.python.org/downloads/) que o `start.bat` também o deteta.
+
+### 3. Descarregar o modelo IA (~4.7 GB)
+
+O modelo não cabe no git nem na release — download directo do HuggingFace:
+
+```
+https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+```
+
+- Cria a pasta `model/` (se não existir) e coloca lá o ficheiro **com o nome `model.gguf`**
+- É uma só vez: ~4.7 GB, demora conforme a internet (~5 min a 150 Mbps)
+
+### 4. Correr
+
+Duplo-clique em **`start.bat`** — o chat abre sozinho no navegador (`http://127.0.0.1:8090/`).
+
+Se algo falhar: `start.bat` diz em falta qual dos 3 (modelo, runtime, python).
 
 ---
 
@@ -24,7 +68,7 @@ Dentro do chat podes anexar ficheiros com o botao 📎 (texto e codigo sao lidos
 | Componente | Detalhe |
 |---|---|
 | **Modelo IA** | `Qwen2.5-Coder-7B-Instruct` (quantização Q4_K_M, GGUF, ~4.7 GB) — especializado em código e tool calling |
-| **Runtime LLM** | llama.cpp `b11753`: build **CUDA 13.4** (`runtime-gpu/`) + build **CPU** (`runtime/`) — o chat escolhe o melhor automaticamente |
+| **Runtime LLM** | llama.cpp `b11753`: **CUDA** (`runtime-gpu/`) + **Vulkan** (`runtime-vulkan/`) + **CPU** (`runtime/`) — o chat escolhe o melhor automaticamente (da release v1.0) |
 | **Python** | Python 3.12.10 embeddable (portátil, sem instalar) |
 | **Interface** | Chat web no navegador (start.bat) + modo terminal CLI (start_cli.bat) — Python stdlib apenas |
 | **Portas locais** | `8080` = llama-server (modelo), `8090` = chat web — so acessiveis na tua maquina |
@@ -208,8 +252,8 @@ Ficheiros gerados durante o uso (podes apagar quando quiseres):
 - Windows 10/11 x64 (ou superior)
 - ~8 GB de RAM livres (o modelo usa ~5–6 GB em CPU; na GPU fica na VRAM)
 - ~6 GB de disco livres
-- **Não** precisa de: internet, Python instalado, Visual C++, GPU, contas ou chaves de API
-- **Opcional**: GPU NVIDIA com 8 GB+ VRAM e driver atual (aí corre ~10x mais rapido)
+- **Não** precisa de: internet, Python instalado, Visual C++, contas ou chaves de API
+- **Opcional**: GPU — NVIDIA (CUDA), AMD/Intel (Vulkan) com 8 GB+ VRAM e driver atual — aí corre ~10x mais rapido
 
 ---
 
@@ -231,11 +275,13 @@ O `.gitignore` mantem o repo leve (~50 KB de codigo) — **nao** entra no git:
 - `runtime/`, `runtime-gpu/`, `runtime-vulkan/` (~2 GB de binarios)
 - `.thor/` (estado local: tarefas, undo, uploads, logs)
 
-Fluxo sugerido:
+Como esta distribuido (repo + release v1.0):
 
-1. `git init` dentro de `thor-portable/` e publicar so o codigo + `LICENSE` + `README.md`.
-2. O modelo e os runtimes podem ser distribuidos como **GitHub Releases** (abaixo de Assets) ou por links diretos (ex.: builds oficiais do llama.cpp + Qwen2.5-Coder-7B GGUF).
-3. Quem clonar o repo precisa de: modelo em `model/model.gguf`, runtimes extraidos nas respetivas pastas, e depois `start.bat`.
+1. **Repo (git)**: so o codigo + `LICENSE` + `README.md` — quem clona segue a seccao *Instalação do zero*.
+2. **Release v1.0 (Assets)**: os 3 zips dos runtimes (`runtime`, `runtime-gpu`, `runtime-vulkan`).
+3. **Modelo**: link directo do HuggingFace no README (4.7 GB, nao passa pelo GitHub).
+
+Actualizacoes de codigo: commit + push no GitHub Desktop; se mudarem os runtimes, criar uma nova release (v1.1...) com os zips novos.
 
 ---
 
