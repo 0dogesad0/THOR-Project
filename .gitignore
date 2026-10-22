@@ -1,0 +1,22 @@
+# estado local do agente (tarefas, undo, uploads, logs, preferencias)
+.thor/
+.mimo/
+
+# modelo IA (~4.7 GB — descarregar e colocar em model/)
+model/*.gguf
+
+# runtimes portateis com binarios (~2 GB — nao vao para o git)
+runtime/
+runtime-gpu/
+runtime-vulkan/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# windows / editores
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
