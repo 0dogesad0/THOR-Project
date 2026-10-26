@@ -263,25 +263,7 @@ Ficheiros gerados durante o uso (podes apagar quando quiseres):
 2. Coloca-o em `model/` (podes apagar o `model.gguf` actual ou renomear).
 3. Corre `start.bat` — o agente deteta automaticamente o `.gguf` nessa pasta.
 
-Modelos maiores = respostas melhores, mas mais lentos em CPU.
-
----
-
-## Publicar no GitHub
-
-O `.gitignore` mantem o repo leve (~50 KB de codigo) — **nao** entra no git:
-
-- `model/*.gguf` (~4.7 GB — o GitHub recusa ficheiros >100 MB)
-- `runtime/`, `runtime-gpu/`, `runtime-vulkan/` (~2 GB de binarios)
-- `.thor/` (estado local: tarefas, undo, uploads, logs)
-
-Como esta distribuido (repo + release v1.0):
-
-1. **Repo (git)**: so o codigo + `LICENSE` + `README.md` — quem clona segue a seccao *Instalação do zero*.
-2. **Release v1.0 (Assets)**: os 3 zips dos runtimes (`runtime`, `runtime-gpu`, `runtime-vulkan`).
-3. **Modelo**: link directo do HuggingFace no README (4.7 GB, nao passa pelo GitHub).
-
-Actualizacoes de codigo: commit + push no GitHub Desktop; se mudarem os runtimes, criar uma nova release (v1.1...) com os zips novos.
+Modelos maiores = respostas melhores, mas mais lentos em CPU/GPU.
 
 ---
 
