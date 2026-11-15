@@ -10,6 +10,10 @@ runtime/
 runtime-gpu/
 runtime-vulkan/
 
+# motor OpenCode: binario + pacotes vendorizados (~420 MB — opencode/install.bat)
+opencode/bun.exe
+opencode/node_modules/
+
 # python
 __pycache__/
 *.pyc

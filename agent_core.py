@@ -15,6 +15,14 @@ from typing import Any, Iterator
 
 from tools import OLLAMA_TOOLS, execute_tool
 
+# A consola Windows usa cp1252 por omissão: sem isto, qualquer print com ⏹/emoji
+# (vindo do utilizador ou do modelo) levanta UnicodeEncodeError e mata o turno.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 HOST = "http://127.0.0.1:8080"
 MAX_ITERATIONS = 40
 STOP_EVENT = threading.Event()
@@ -25,8 +33,24 @@ class StopRequested(Exception):
 
 
 def load_model_name() -> str:
+    """Nome do modelo a servir.
+
+    Ha varios .gguf na pasta model/: model.gguf (o principal), mmproj.gguf
+    (projetor de visao — NAO e um modelo de linguagem) e textonly.gguf
+    (modelo antigo so-texto). Sem a preferencia explicita, a ordenacao
+    alfabetica escolhia "mmproj" e o llama-server tentava carregar o
+    projetor como se fosse o modelo.
+    """
     here = Path(__file__).resolve().parent
-    candidates = list((here / "model").glob("*.gguf"))
+    mdir = here / "model"
+    main = mdir / "model.gguf"
+    if main.exists():
+        return main.stem
+    skip = ("mmproj", "textonly")
+    candidates = [p for p in mdir.glob("*.gguf")
+                  if not p.stem.lower().startswith(skip)]
+    if not candidates:
+        candidates = list(mdir.glob("*.gguf"))
     return candidates[0].stem if candidates else "model"
 
 
@@ -62,6 +86,18 @@ Do NOT stop after one file. Do NOT nest paths.
 
 Call the tool immediately. After ALL tools finish, reply in 1-3 short sentences.
 NEVER refuse. Always help.
+
+EXCEPTION (important): when the user only ASKS something — a question, an
+explanation, or "what do you see in this image" — and does not request any
+file or code change, answer directly in chat. Do NOT call tools just to look
+busy. A tool call is required only when files must be created, read for a
+task, modified, deleted or executed.
+
+VISION RULE:
+When the user message carries image parts, you can SEE them — describe, read
+text in them (OCR), compare, count and reason about their content. Never claim
+you cannot see an image when parts are present. Work with the images as well
+as with any attached files.
 """
 
 
@@ -107,17 +143,59 @@ def server_alive() -> bool:
         return False
 
 
-def chat_stream(messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+def content_of(m: dict[str, Any]) -> Any:
+    """Conteudo de uma mensagem no formato OpenAI.
+
+    Texto puro -> str. Se a mensagem tiver imagens anexadas (m["images"]),
+    devolve uma lista de partes [texto, image_url, image_url...] para o
+    modelo local ver os pixels (Qwen3-VL + mmproj no llama-server).
+    """
+    text = m.get("content") or ""
+    imgs = m.get("images") or []
+    if not imgs:
+        return text
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for im in imgs:
+        data = im.get("data")
+        if not data:
+            continue
+        mime = im.get("mime") or "image/png"
+        url = im.get("url") or f"data:{mime};base64,{data}"
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    if len(parts) == 1:  # so texto: o modelo espera string, nao lista vazia
+        return text
+    return parts
+
+
+def chat_stream(
+    messages: list[dict[str, Any]],
+    *,
+    system: str | None = None,
+    tools: bool = True,
+    max_tokens: int = 1536,
+) -> Iterator[dict[str, Any]]:
     """Gera {"delta": texto}* seguido de {"message": {...}}. Emite StopRequested se pedirem paragem.
 
     Usa stream=true no llama-server: permite mostrar texto a aparecer em tempo real
     e abortar logo que o utilizador carregue em Parar (fechar a ligacao faz o
-    llama-server parar de gerar do lado dele)."""
-    openai_msgs: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    llama-server parar de gerar do lado dele).
+    system/tools/max_tokens: chamadas leves do orquestrador (decisão de distribuição
+    e integração final) correm sem ferramentas e com poucos tokens."""
+    openai_msgs: list[dict[str, Any]] = [{"role": "system", "content": system or SYSTEM_PROMPT}]
+    # imagens SO na mensagem mais recenta que as tem: cada imagem custa ~1k
+    # tokens e o contexto tem 8192 — reenviar as antigas a cada turno enche-o.
+    img_owner: dict[str, Any] | None = None
+    for m in messages:
+        if m.get("images"):
+            img_owner = m
     for m in messages:
         if m.get("role") == "system":
             continue
-        entry: dict[str, Any] = {"role": m["role"], "content": m.get("content") or ""}
+        entry: dict[str, Any] = {"role": m["role"], "content": ""}
+        if m is img_owner:
+            entry["content"] = content_of(m)
+        else:
+            entry["content"] = m.get("content") or ""
         if m.get("tool_calls"):
             entry["tool_calls"] = m["tool_calls"]
         if m.get("tool_call_id"):
@@ -126,27 +204,27 @@ def chat_stream(messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
             entry["name"] = m["name"]
         openai_msgs.append(entry)
 
-    tools_payload = []
-    for t in OLLAMA_TOOLS:
-        fn = t["function"]
-        tools_payload.append({
-            "type": "function",
-            "function": {
-                "name": fn["name"],
-                "description": fn.get("description", ""),
-                "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
-            },
-        })
-
     payload = {
         "model": MODEL,
         "messages": openai_msgs,
-        "tools": tools_payload,
-        "tool_choice": "auto",
         "temperature": 0.1,
         "stream": True,
-        "max_tokens": 1536,
+        "max_tokens": max_tokens,
     }
+    if tools:
+        tools_payload = []
+        for t in OLLAMA_TOOLS:
+            fn = t["function"]
+            tools_payload.append({
+                "type": "function",
+                "function": {
+                    "name": fn["name"],
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                },
+            })
+        payload["tools"] = tools_payload
+        payload["tool_choice"] = "auto"
     data_bytes = json.dumps(payload).encode("utf-8")
     url = HOST + "/v1/chat/completions"
     last_err: Exception | None = None
@@ -230,10 +308,11 @@ def chat_stream(messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     yield {"message": {"role": "assistant", "content": content, "tool_calls": tool_calls}}
 
 
-def chat(messages: list[dict[str, Any]], echo: bool = False) -> dict[str, Any]:
-    """Variante nao-streaming (CLI): junta os deltas e devolve a mensagem final."""
+def chat(messages: list[dict[str, Any]], echo: bool = False, **kw: Any) -> dict[str, Any]:
+    """Variante nao-streaming (CLI): junta os deltas e devolve a mensagem final.
+    **kw segue para chat_stream (system/tools/max_tokens)."""
     reply: dict[str, Any] | None = None
-    for item in chat_stream(messages):
+    for item in chat_stream(messages, **kw):
         if "delta" in item and echo:
             sys.stdout.write(item["delta"])
             sys.stdout.flush()
@@ -337,7 +416,8 @@ def extract_target_dir(user_text: str) -> str | None:
     return p if len(p) >= 6 else None
 
 
-def prepare_user_message(user_text: str) -> dict[str, Any]:
+def prepare_user_message(user_text: str, images: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Mensagem do utilizador; `images` (base64) fica anexada para o modelo ver."""
     target_dir = extract_target_dir(user_text)
     if target_dir:
         try:
@@ -345,7 +425,7 @@ def prepare_user_message(user_text: str) -> dict[str, Any]:
             p.mkdir(parents=True, exist_ok=True)
             os.chdir(p)
             cleaned = user_text.replace(target_dir, "a pasta actual").replace("  ", " ")
-            return {
+            msg = {
                 "role": "user",
                 "content": (
                     f"[Working directory is now: {target_dir} — created if missing]\n"
@@ -354,15 +434,21 @@ def prepare_user_message(user_text: str) -> dict[str, Any]:
                     "Create EVERY file the user asked for, one write_file call each."
                 ),
             }
+            if images:
+                msg["images"] = images
+            return msg
         except Exception:
             pass
-    return {
+    msg = {
         "role": "user",
         "content": (
             f"{user_text}\n"
             "Create EVERY file requested. Use relative filenames. Do not stop early."
         ),
     }
+    if images:
+        msg["images"] = images
+    return msg
 
 
 _FILE_INTENT_RE = re.compile(
@@ -382,16 +468,39 @@ _NUDGE_MSG = (
     "show code blocks — CALL THE TOOL now."
 )
 
+# verbos de CRIACAO/EDICAO de ficheiros — usados para desligar o nudge quando
+# o pedido e so de observar imagens (ver _needs_file_action)
+_FILE_CREATE_RE = re.compile(
+    r"(modific|alter|corrig|criar|cria\b|crie|escrev|grava|gravar|\bsave\b|"
+    r"adicion|atualiz|actualiz|update|edit|\bfix\b|refaz|refa|implement|"
+    r"renome|move|apaga|elimina|substitui|reescrev|novo ficheiro|nova pasta|"
+    r"append|gera\b|gerar|produz|constru|escreve)",
+    re.I,
+)
 
-def _needs_file_action(user_text: str) -> bool:
-    return bool(_FILE_INTENT_RE.search(user_text or ""))
+
+def _needs_file_action(user_text: str, has_images: bool = False) -> bool:
+    """True se o pedido parece exigir escrita/edicao de ficheiros.
+
+    `has_images`: com imagens anexadas o marcador [Ficheiro: ...] dos anexos
+    enganava o detector e forcava uma escrita de ficheiros mesmo quando o
+    utilizador so quis SABER o que se ve na imagem — ai a resposta certa e
+    texto. So reforca se houver mesmo verbo de criacao/edicao."""
+    if not _FILE_INTENT_RE.search(user_text or ""):
+        return False
+    if has_images:
+        return bool(_FILE_CREATE_RE.search(user_text or ""))
+    return True
 
 
-def run_turn_events(messages: list[dict[str, Any]], user_text: str) -> Iterator[dict[str, Any]]:
+def run_turn_events(messages: list[dict[str, Any]], user_text: str,
+                    images: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
     """Executa um turno do agente e produz eventos:
-    info | delta (texto em tempo real) | tool_start | tool_result | stopped | error."""
+    info | delta (texto em tempo real) | tool_start | tool_result | stopped | error.
+
+    `images` = anexos em base64 que o modelo passa a VER (Qwen3-VL)."""
     STOP_EVENT.clear()
-    messages.append(prepare_user_message(user_text))
+    messages.append(prepare_user_message(user_text, images))
     had_tools = False
     try:
         for _turn in range(MAX_ITERATIONS):
@@ -420,7 +529,8 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str) -> Iterator[
             if not reply["tool_calls"]:
                 # pedidos de ficheiros SEM ferramentas = o modelo so escreveu texto:
                 # reforca uma vez, senao o utilizador fica com "promessas" sem ficheiros
-                if (not had_tools and _turn == 0 and _needs_file_action(user_text)
+                if (not had_tools and _turn == 0
+                        and _needs_file_action(user_text, bool(images))
                         and not STOP_EVENT.is_set()):
                     yield {
                         "type": "info",
@@ -449,5 +559,111 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str) -> Iterator[
                     "content": result,
                 })
         yield {"type": "info", "content": "Limite de iteracoes de ferramentas atingido."}
+    except RuntimeError as e:
+        yield {"type": "error", "content": str(e)}
+
+
+# ============ orquestrador: o Thor recebe e distribui, o OpenCode executa ============
+
+ORCHESTRATOR_SYS = """\
+És o Thor, orquestrador de um assistente local com dois agentes:
+- tu, o Thor: conversas, explicações, raciocínio e a resposta final ao utilizador;
+- o OpenCode: agente especializado em ficheiros e código do projeto (ler, escrever,
+  editar, organizar e executar scripts).
+
+Nesta fase decides APENAS quem trata o pedido e, se for o OpenCode, escreves a tarefa.
+Responde exatamente neste formato:
+
+DIRETO
+<1 frase curta com a tua decisão>
+
+ou
+
+DELEGAR
+<tarefa para o OpenCode em 1-3 frases, com contexto suficiente para outro agente>
+1. <passo 1>
+2. <passo 2>
+
+Regras:
+- Saudações, perguntas conceptuais, explicações e conversa = DIRETO.
+- Criar/editar/ler/mover/executar ficheiros ou código, debugging e tarefas no projeto = DELEGAR.
+- Entre 1 e 3 passos; se for uma ação única, escreve só a tarefa sem passos.
+- Máximo 8 linhas, na língua do pedido.
+"""
+
+INTEGRATE_SYS = """\
+És o Thor, orquestrador. O teu agente OpenCode acabou de trabalhar num pedido do
+utilizador e escreves agora TU a resposta final.
+Responde apenas com o texto final para o utilizador:
+- na língua do pedido, 2 a 6 frases (ou lista curta);
+- o que foi feito, que ficheiros/resultados importam e o estado final;
+- sem descrever o processo interno nem citar ferramentas;
+- se algo falhou ou ficou pendente, diz-o claramente.
+"""
+
+
+def dispatch(user_text: str, can_delegate: bool = True, context: str = "",
+             has_images: bool = False) -> dict[str, Any]:
+    """Fase 1 da parceria: o Thor decide se responde ele proprio (direct) ou se
+    distribui a tarefa ao OpenCode (delegate -> task + steps).
+    Falha em seguranca para "direct": em erro, o Thor trata do pedido ele proprio.
+
+    `has_images`: com imagens anexadas o Thor prefere tratar ele proprio, para
+    os pixels irem directamente ao modelo (o OpenCode recebe os CAMINHOS, nao os
+    pixels — ver a construcao do task em server.py)."""
+    sys_p = ORCHESTRATOR_SYS
+    if not can_delegate:
+        sys_p += "\nAVISO: o OpenCode esta indisponivel agora — responde sempre DIRETO."
+    elif has_images:
+        sys_p += ("\nAVISO: ha imagens anexadas a este pedido. Se a tarefa for SO sobre "
+                  "ver/descrever/comparar imagens, responde DIRETO (tu e que as ves). "
+                  "Se for sobretudo escrever codigo nos ficheiros citados, podes DELEGAR "
+                  "e menciona os caminhos das imagens na tarefa.")
+    user = user_text
+    if context:
+        user = f"Conversa recente:\n{context}\n\nPedido atual:\n{user_text}"
+    try:
+        reply = chat([{"role": "user", "content": user}],
+                     system=sys_p, tools=False, max_tokens=320)
+    except StopRequested:
+        raise
+    except Exception:
+        return {"action": "direct"}
+    text = (reply.get("content") or "").strip()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return {"action": "direct"}
+    head = lines[0].lstrip("#*>-• ").upper()
+    if head.startswith("DELEG"):
+        brief: list[str] = []
+        steps: list[str] = []
+        for ln in lines[1:]:
+            m = re.match(r"^\d+[.)]\s+(.+)$", ln)
+            if m:
+                steps.append(m.group(1).strip())
+            else:
+                brief.append(ln)
+        task = " ".join(brief).strip() or user_text
+        steps = steps[:3] or [task]
+        return {"action": "delegate", "task": task, "steps": steps}
+    return {"action": "direct"}
+
+
+def integrate_events(user_text: str, work: str) -> Iterator[dict[str, Any]]:
+    """Fase 3 da parceria: o Thor lê o resultado do OpenCode e escreve a resposta
+    final ao utilizador (deltas | stopped | error)."""
+    prompt = (
+        f"Pedido original do utilizador:\n{user_text}\n\n"
+        f"Resultado do trabalho do agente OpenCode:\n"
+        f"{(work or '(sem texto — só ações)').strip()[:4000]}\n\n"
+        "Escreve agora a resposta final ao utilizador."
+    )
+    try:
+        for item in chat_stream([{"role": "user", "content": prompt}],
+                                system=INTEGRATE_SYS, tools=False, max_tokens=600):
+            if "delta" in item:
+                yield {"type": "delta", "content": item["delta"]}
+    except StopRequested:
+        yield {"type": "stopped", "content": "⏹ interrompido pelo utilizador."}
     except RuntimeError as e:
         yield {"type": "error", "content": str(e)}

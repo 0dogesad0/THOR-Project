@@ -1,6 +1,6 @@
 # Thor Agent
 
-Chat AI de coding **100% offline e portátil** para Windows — estilo opencode/Cursor. Sem internet, sem instalações, sem contas.
+Chat AI de coding **100% offline e portátil** para Windows — estilo opencode/Cursor. Sem internet, sem instalações, sem contas. **Vê imagens** e trabalha em **parceria Thor + OpenCode**.
 
 > **A chegar do GitHub?** Este repo contém só o código (~50 KB). Para funcionar faltam 2 coisas: os **runtimes** (release v1.0) e o **modelo IA** — as instruções completas estão em [Instalação do zero](#instalação-do-zero-vindo-do-github).
 
@@ -31,16 +31,19 @@ Como extrair: cria a pasta correspondente dentro do projeto e descompacta **o co
 - **Com GPU**: extrai também os outros dois — o chat escolhe sozinho (CUDA → Vulkan → CPU).
 - Sem Python nenhum instalado? O `runtime` traz o Python portátil; se o teu zip não o incluir, instala [Python 3.12+](https://www.python.org/downloads/) que o `start.bat` também o deteta.
 
-### 3. Descarregar o modelo IA (~4.7 GB)
+### 3. Descarregar o modelo IA (~5.8 GB) — com visão
 
-O modelo não cabe no git nem na release — download directo do HuggingFace:
+O modelo não cabe no git nem na release. Duplo-clique em **`install_model.bat`**
+(faz os 2 downloads de uma vez e retoma se cair) — ou descarrega à mão:
 
-```
-https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf
-```
+| Ficheiro | URL | Onde pôr |
+|---|---|---|
+| `Qwen3VL-8B-Instruct-Q4_K_M.gguf` (5.03 GB) | `https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3VL-8B-Instruct-Q4_K_M.gguf` | `model/model.gguf` |
+| `mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf` (0.75 GB) | `https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf` | `model/mmproj.gguf` |
 
-- Cria a pasta `model/` (se não existir) e coloca lá o ficheiro **com o nome `model.gguf`**
-- É uma só vez: ~4.7 GB, demora conforme a internet (~5 min a 150 Mbps)
+- É uma só vez: **sem internet depois disto**
+- O `mmproj` é o **projetor de visão** — sem ele o chat funciona mas não vê imagens
+- Sem `install_model.bat`? Podes copiar os 2 ficheiros de outra instalação do Thor
 
 ### 4. Correr
 
@@ -59,7 +62,10 @@ Se algo falhar: `start.bat` diz em falta qual dos 3 (modelo, runtime, python).
 
 Modo terminal (antigo): usa **`start_cli.bat`**.
 
-Dentro do chat podes anexar ficheiros com o botao 📎 (texto e codigo sao lidos e enviados ao modelo; imagens sao guardadas em `.thor/uploads/` — o modelo actual so processa texto).
+Dentro do chat podes anexar ficheiros de **qualquer tipo** com o botao **`＋`**
+ao lado do campo de texto — ou simplesmente **arrastando-os para a janela**, ou
+colando com **Ctrl+V**. Texto/codigo vai inline no pedido; imagens sao **vistas
+pelo modelo**; binarios ficam em `.thor/uploads/` e o agente opera-os por caminho.
 
 ---
 
@@ -67,15 +73,73 @@ Dentro do chat podes anexar ficheiros com o botao 📎 (texto e codigo sao lidos
 
 | Componente | Detalhe |
 |---|---|
-| **Modelo IA** | `Qwen2.5-Coder-7B-Instruct` (quantização Q4_K_M, GGUF, ~4.7 GB) — especializado em código e tool calling |
+| **Modelo IA** | `Qwen3-VL-8B-Instruct` (Q4_K_M, GGUF, 5.03 GB) + `mmproj` (0.75 GB) — **vê imagens**, tool calling e código |
 | **Runtime LLM** | llama.cpp `b11753`: **CUDA** (`runtime-gpu/`) + **Vulkan** (`runtime-vulkan/`) + **CPU** (`runtime/`) — o chat escolhe o melhor automaticamente (da release v1.0) |
+| **Motor de agente** | **Thor + OpenCode** em parceria (ver secção própria) — `opencode/` com o SDK embebido, 100% local |
 | **Python** | Python 3.12.10 embeddable (portátil, sem instalar) |
 | **Interface** | Chat web no navegador (start.bat) + modo terminal CLI (start_cli.bat) — Python stdlib apenas |
 | **Portas locais** | `8080` = llama-server (modelo), `8090` = chat web — so acessiveis na tua maquina |
-| **Tamanho total** | ~5.5 GB (modelo + runtimes CPU+GPU + scripts) |
-| **Dependências externas** | Nenhuma — funciona sem internet e sem software pré-instalado |
+| **Tamanho total** | ~7 GB (modelo + runtimes CPU+GPU + scripts) |
+| **Dependências externas** | Nenhuma em runtime — funciona sem internet e sem software pré-instalado |
 
-O modelo Qwen2.5 suporta **tool calling nativo** (function calling), o que permite ao agente decidir quando ler, escrever, editar ou executar comandos.
+O Qwen3-VL suporta **tool calling nativo** (function calling) e **visão**: o
+agente decide quando ler, escrever, editar ou executar comandos — e também
+quando *olhar* para uma imagem que lhe envias.
+
+---
+
+## Motor de agente: Thor + OpenCode (parceria)
+
+Nao sao dois agentes separados — **trabalham juntos em cada pedido**:
+
+```
+tu escreves o pedido
+      │
+      ▼
+ ┌─────────────┐  fase 1   o Thor analisa e DECIDE quem trata
+ │     THOR    │──────────► direct  → o Thor responde com as suas ferramentas
+ │  (recebe e  │           delegate → distribui a tarefa ao OpenCode
+ │ distribui)  │  fase 2   eventos em tempo real: delta / tool_start / tool_result
+ └─────────────┘  fase 3   o Thor INTEGRA o resultado e escreve a resposta final
+      │
+      ▼
+ ┌─────────────┐
+ │  OpenCode   │  agente de ficheiros/codigo: executa os passos que o Thor
+ │  (executa)  │  lhe atribuiu, com as ferramentas dele
+ └─────────────┘
+```
+
+- **O Thor e o orquestrador**: recebe, decide, distribui e integra. Tu falas
+  sempre com o Thor — nunca precisas de escolher "um ou outro".
+- Se o OpenCode falhar ou nao estiver instalado, **o Thor assume a tarefa ele
+  proprio** (o pedido nunca fica por atender).
+- Tudo passa pelos **mesmos eventos SSE de sempre** (`start`, `delta`,
+  `tool_start`, `tool_result`, `info`, `error`, `stopped`, `done`) — o ⏹ Parar,
+  os separadores e o historico continuam a funcionar igual.
+- Se o OpenCode nao estiver instalado, o badge do topo mostra so `· Thor` e a
+  parceria fica desligada sem quebrar nada.
+
+### Instalar o motor OpenCode (opcional, 1 vez)
+
+Precisa de internet **so uma vez** (~420 MB); depois corre 100% local:
+
+```
+opencode\install.bat
+```
+
+Instala o `bun.exe` portatil e os pacotes `@opencode/sdk` + `@opencode/ai`.
+
+### Como se garante que e offline
+
+| Camada | Garantia |
+|---|---|
+| `opencode/host.ts` | **guarda de fetch** injetada: so deixa `127.0.0.1` / `localhost` / `::1` — tudo o resto devolve `503` e fica registado no log |
+| `models: { fetch: false }` | o OpenCode nao vai buscar a lista de modelos a models.dev |
+| env `OPENCODE_DISABLE_*` | desliga autoupdate, models fetch e share |
+| `opencode.json` | `share: "disabled"`, `update: "disable"`, permissoes `allow` (sem pedidos de aprovacao — quem aprova e o proprio Thor) |
+| Modelo | llama-server so escuta em `127.0.0.1:8080` |
+
+No arranque o servidor imprime `Parceria ativa: Thor (recebe e distribui) + OpenCode (executa) — 100% local`.
 
 ---
 
@@ -89,14 +153,14 @@ No topo do chat ha um seletor **Motor** (fica ao lado do estado do modelo):
 | **GPU** | Força GPU (qualquer vendor); se todas falarem, cai para CPU com aviso |
 | **CPU** | Força o modo CPU (util quando queres poupar a GPU para outro programa) |
 
-Velocidades medidas nesta maquina (resposta ~150 tokens):
+Velocidades medidas nesta máquina (RTX 3090, resposta ~50 tokens):
 
 | Motor | Geração | Processamento do pedido |
 |---|---|---|
-| GPU RTX 4060 (8 GB, CUDA) | **~44 tok/s** | **~105 tok/s** |
-| CPU (16 threads) | ~4.2 tok/s | ~9 tok/s |
+| GPU RTX 3090 (24 GB, CUDA) | **~100 tok/s** | **~1100–3100 tok/s** |
+| CPU (16 threads) | ~4–5 tok/s | ~9 tok/s |
 
-Ou seja: **~10x mais rapido na GPU** — uma resposta de 150 tokens demora ~4 s em vez de ~40 s.
+Ou seja: **~20x mais rapido na GPU** — uma resposta de 150 tokens demora ~1.5 s em vez de ~30 s.
 
 Suporte por fabricante de GPU:
 
@@ -112,7 +176,7 @@ Detalhes:
 - A escolha fica guardada em `.thor/backend` e vale para os proximos arranques.
 - Mudar de motor reinicia o modelo (~10 s GPU, ~40 s CPU); **nao** desliga o chat.
 - O chat pergunta ao Windows (`nvidia-smi` / WMI) que GPUs existem e escolhe o melhor backend automaticamente.
-- O modelo usa ~4.7 GB — cabe por completo em GPUs de 8 GB+ VRAM (`-ngl 99`). Com menos VRAM, o arranque GPU falha e o chat cai para CPU sozinho.
+- O modelo usa ~5 GB (+0.75 GB do projetor de visão) — cabe por completo em GPUs de 8 GB+ VRAM (`-ngl 99`). Com menos VRAM, o arranque GPU falha e o chat cai para CPU sozinho.
 - O chat mostra no estado o backend efectivo: `GPU·CUDA`, `GPU·VULKAN` ou `CPU`.
 - Se o llama-server morrer, o chat **reinicia-o sozinho** no modo escolhido.
 - Podes apagar `runtime-gpu/` ou `runtime-vulkan/` que nao usems — o Auto salta para a proxima opcao.
@@ -194,7 +258,14 @@ Abrido pelo `start.bat` em `http://127.0.0.1:8090/`:
 - **Texto em tempo real** — a resposta do modelo aparece token a token (streaming).
 - **⏹ Parar** — botao vermelho ao lado de Enviar: aborta o raciocinio do modelo **naquele momento**, mantendo o servidor e o chat vivos. O que ja foi gerado fica na conversa.
 - **Streaming das ferramentas** — cada chamada aparece em tempo real (nome, argumentos, resultado), como no opencode.
-- **Anexar ficheiros** (📎) — texto/codigo e lido e injetado no pedido; imagens sao guardadas em `.thor/uploads/`.
+- **Anexar com `＋`, arrastar ou colar** — 3 formas de levar ficheiros ao chat:
+  - **`＋`** (ao lado do campo) → *Ficheiros…* (seleção múltipla), *Uma pasta inteira…* ou *Colar da área de transferência*;
+  - **arrastar** qualquer ficheiro (ou vários de uma vez) por cima da janela — aparece uma zona de destaque;
+  - **Ctrl+V** com uma imagem na área de transferência.
+  Texto/código é lido e injetado no pedido, **imagens são vistas pelo modelo**
+  (com miniatura no chip do anexo) e binários ficam em `.thor/uploads/`.
+- **Leitura de imagens** — o modelo descreve, lê texto/OCR, compara e raciocina
+  sobre as imagens que enviares. Podes anexar várias de uma vez (até 8 por pedido).
 - **Estado do modelo** (verde = pronto) + **seletor Motor** (Auto/GPU/CPU — ver seccao acima).
 - Se o llama-server morrer a meio, o chat **reinicia-o automaticamente** no modo escolhido.
 
@@ -219,18 +290,28 @@ Abrido pelo `start.bat` em `http://127.0.0.1:8090/`:
 
 ```
 thor-portable/
-├── start.bat          ← entrada: chat web (abre no navegador; o modelo e gerido pelo server.py)
-├── start_cli.bat      ← modo terminal (CLI)
-├── agent_core.py      ← nucleo do agente (streaming, tool calling, paragem, caminhos Windows)
-├── agent.py           ← loop do chat em terminal (usa agent_core)
-├── server.py          ← servidor HTTP do chat web (API + backends CPU/GPU + uploads + SSE)
-├── chat.html          ← interface do chat (separadores, ⏹ Parar, seletor Motor)
-├── tools.py           ← todas as ferramentas (ficheiros, terminal, web, undo…)
+├── start.bat            ← entrada: chat web (abre no navegador; o modelo e gerido pelo server.py)
+├── start_cli.bat        ← modo terminal (CLI)
+├── install_model.bat    ← 1x: descarrega o modelo Qwen3-VL + projetor de visao (~5.8 GB)
+├── agent_core.py        ← nucleo do agente (streaming, tool calling, visao, parceria)
+├── agent.py             ← loop do chat em terminal (usa agent_core)
+├── server.py            ← servidor HTTP (API + backends CPU/GPU + uploads + SSE + parceria)
+├── chat.html            ← interface (separadores, ⏹ Parar, arrastar/soltar, botao ＋)
+├── tools.py             ← todas as ferramentas (ficheiros, terminal, web, undo…)
+├── opencode_bridge.py   ← ponte Python <-> host OpenCode (spawna, relays, traduz eventos)
 ├── model/
-│   └── model.gguf     ← Qwen2.5-Coder-7B-Instruct Q4_K_M (~4.7 GB)
-├── runtime/           ← CPU: llama-server.exe + Python 3.12 portatil + DLLs
-├── runtime-gpu/       ← GPU NVIDIA: llama-server.exe CUDA 13.4 + cuBLAS (apagar = sem CUDA)
-└── runtime-vulkan/    ← GPU AMD/Intel/NVIDIA: llama-server.exe Vulkan (apagar = sem Vulkan)
+│   ├── model.gguf       ← Qwen3-VL-8B-Instruct Q4_K_M (5.03 GB) — codigo + visao
+│   ├── mmproj.gguf      ← projetor de visao (0.75 GB) — sem ele nao ha imagens
+│   └── textonly.gguf    ← (opcional) modelo antigo so-texto, backup
+├── opencode/            ← motor OpenCode embebido (opencode/install.bat 1x)
+│   ├── install.bat      ← instala bun + @opencode/sdk + @opencode/ai
+│   ├── host.ts          ← host embebido: protocolo stdio + guarda de rede offline
+│   ├── opencode.json    ← provider "thor" -> 127.0.0.1:8080, permissoes allow
+│   ├── package.json     ← dependencias do host (@opencode/sdk, @opencode/ai)
+│   └── bun.lock         ← versoes congeladas (reproduzivel)
+├── runtime/             ← CPU: llama-server.exe + Python 3.12 portatil + DLLs
+├── runtime-gpu/         ← GPU NVIDIA: llama-server.exe CUDA + cuBLAS (apagar = sem CUDA)
+└── runtime-vulkan/      ← GPU AMD/Intel/NVIDIA: llama-server.exe Vulkan (apagar = sem Vulkan)
 ```
 
 Ficheiros gerados durante o uso (podes apagar quando quiseres):
@@ -239,10 +320,12 @@ Ficheiros gerados durante o uso (podes apagar quando quiseres):
 .thor/
 ├── todo.json          ← lista de tarefas
 ├── undo/              ← snapshots para /undo
-├── uploads/           ← imagens anexadas no chat web
+├── uploads/           ← imagens e ficheiros anexados no chat web
 ├── backend            ← motor escolhido (auto|cpu|gpu)
 ├── llama_backend      ← ultimo motor com que o llama arrancou
-└── llama_spawn.log    ← log de arranque do modelo (diagnostico)
+├── opencode.log       ← log do host OpenCode (diagnostico da parceria)
+├── llama_spawn.log    ← log de arranque do modelo (diagnostico)
+└── server.out         ← saida do servidor (se arrancado por script)
 ```
 
 ---
@@ -250,18 +333,23 @@ Ficheiros gerados durante o uso (podes apagar quando quiseres):
 ## Requisitos de máquina
 
 - Windows 10/11 x64 (ou superior)
-- ~8 GB de RAM livres (o modelo usa ~5–6 GB em CPU; na GPU fica na VRAM)
-- ~6 GB de disco livres
-- **Não** precisa de: internet, Python instalado, Visual C++, contas ou chaves de API
+- ~8 GB de RAM livres (o modelo usa ~6 GB em CPU; na GPU fica na VRAM)
+- ~8 GB de disco livres (runtimes + modelo + projetor de visão)
+- **Não** precisa de: internet (a não ser para os 2 downloads de instalação), Python instalado, Visual C++, contas ou chaves de API
 - **Opcional**: GPU — NVIDIA (CUDA), AMD/Intel (Vulkan) com 8 GB+ VRAM e driver atual — aí corre ~10x mais rapido
 
 ---
 
 ## Trocar o modelo
 
-1. Descarrega outro `.gguf` com suporte a tool calling (ex.: `Qwen2.5-3B-Instruct`, `Qwen2.5-Coder-7B`).
-2. Coloca-o em `model/` (podes apagar o `model.gguf` actual ou renomear).
-3. Corre `start.bat` — o agente deteta automaticamente o `.gguf` nessa pasta.
+1. Descarrega outro `.gguf` **com visão** (tem de vir com o ficheiro `mmproj-*.gguf`)
+   — ex.: `Qwen3-VL-4B-Instruct`, `Qwen3-VL-8B-Instruct`, `Qwen2.5-VL-7B-Instruct`.
+2. Coloca o modelo em `model/model.gguf` e o projetor em `model/mmproj.gguf`.
+3. Corre `start.bat` — o agente deteta-os automaticamente.
+
+So texto (sem visão): podes pôr qualquer `.gguf` com tool calling em
+`model/model.gguf` e **apagar** `model/mmproj.gguf` — o chat arranca na mesma,
+so nao ve imagens (o badge deixa de dizer `👁 vê imagens`).
 
 Modelos maiores = respostas melhores, mas mais lentos em CPU/GPU.
 
@@ -269,8 +357,9 @@ Modelos maiores = respostas melhores, mas mais lentos em CPU/GPU.
 
 ## Licenças
 
-- **Agente Thor (agent_core.py, agent.py, server.py, chat.html, tools.py, docs)**: MIT (ver `LICENSE`)
+- **Agente Thor (agent_core.py, agent.py, server.py, chat.html, tools.py, opencode_bridge.py, docs)**: MIT (ver `LICENSE`)
+- **OpenCode (`@opencode/sdk`, `@opencode/ai`)**: distribuído pelo seu próprio licenciamento (vendored em `opencode/node_modules/`, não vai para o git)
 - **llama.cpp**: MIT (incluido nos runtimes)
 - **OpenMP (LLVM)**: Apache-2.0
-- **Qwen2.5**: Apache-2.0 (model weights — redistribuir com essa licenca)
+- **Qwen3-VL**: Apache-2.0 (model weights — redistribuir com essa licenca)
 - **Python**: PSF License

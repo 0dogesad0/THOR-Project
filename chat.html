@@ -140,6 +140,46 @@
   .welcome p { font-size: 14px; line-height: 1.7; }
   .welcome code { background: var(--bg3); padding: 2px 6px; border-radius: 4px; color: var(--accent); }
 
+  /* ---------- anexos: arrastar/soltar, botao +, miniaturas ---------- */
+  #dropOverlay {
+    position: fixed; inset: 0; z-index: 60; display: none;
+    background: rgba(88,166,255,.12); border: 3px dashed var(--accent);
+    align-items: center; justify-content: center; pointer-events: none;
+  }
+  #dropOverlay.on { display: flex; }
+  #dropOverlay .dbox {
+    background: var(--bg2); border: 1px solid var(--accent); padding: 24px 36px;
+    border-radius: 12px; font-size: 17px; font-weight: 600; color: var(--accent);
+    text-align: center; box-shadow: 0 12px 40px #000a;
+  }
+  #dropOverlay .dbox small { display: block; color: var(--muted); font-weight: 400;
+    font-size: 13px; margin-top: 6px; }
+
+  #plusWrap { position: relative; display: flex; }
+  button.icon {
+    width: 42px; height: 44px; padding: 0; font-size: 20px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #plusMenu {
+    position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 40;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    min-width: 230px; overflow: hidden; display: none; box-shadow: 0 10px 30px rgba(0,0,0,.55);
+  }
+  #plusMenu.on { display: block; }
+  #plusMenu button {
+    display: flex; gap: 9px; width: 100%; border: 0; background: transparent;
+    padding: 10px 14px; text-align: left; border-radius: 0; font-size: 13px;
+  }
+  #plusMenu button:hover { background: var(--bg3); color: var(--accent); }
+  #plusMenu .sep { border-top: 1px solid var(--border); margin: 4px 0; }
+
+  .filechip { max-width: 240px; }
+  .attachthumb {
+    width: 40px; height: 40px; object-fit: cover; border-radius: 6px;
+    border: 1px solid var(--border); flex: none; background: var(--bg);
+  }
+  .filechip .meta { color: var(--muted); }
+
   dialog {
     background: var(--bg2); color: var(--text); border: 1px solid var(--border);
     border-radius: 10px; padding: 18px; min-width: 340px;
@@ -152,7 +192,7 @@
 <body>
 
 <header>
-  <div class="brand">Thor Agent <small id="modelName"></small></div>
+  <div class="brand">Thor Agent <small id="modelName"></small> <small id="agentBadge" title="Parceria local: o Thor recebe e distribui, o OpenCode executa — sem internet"></small></div>
   <form id="cwdForm">
     <input id="cwdInput" placeholder="Caminho da pasta de trabalho…" spellcheck="false">
     <button type="button" onclick="pickFolder()" title="Abrir o seletor de pastas do Windows">📂 Escolher…</button>
@@ -171,13 +211,29 @@
 
 <div id="chat"></div>
 
+<div id="dropOverlay">
+  <div class="dbox">Solta aqui os ficheiros
+    <small>imagens, texto, código — podes largar vários de uma vez</small>
+  </div>
+</div>
+
 <div id="composer">
   <div class="inner">
     <div id="attachBar"></div>
     <div id="inputRow">
-      <button onclick="document.getElementById('fileInput').click()" title="Anexar ficheiro">📎</button>
+      <div id="plusWrap">
+        <button class="icon" id="plusBtn" title="Anexar ficheiros, pasta ou colar"
+                onclick="togglePlusMenu(event)">＋</button>
+        <div id="plusMenu">
+          <button onclick="pickFiles()">📎 Ficheiros… <span style="color:var(--muted);margin-left:auto">vários</span></button>
+          <button onclick="pickFolderFiles()">📁 Uma pasta inteira…</button>
+          <div class="sep"></div>
+          <button onclick="pasteClipboard()">📋 Colar da área de transferência</button>
+        </div>
+      </div>
       <input type="file" id="fileInput" multiple hidden>
-      <textarea id="msgInput" placeholder="Escreve o teu pedido… (Enter envia, Shift+Enter nova linha)"></textarea>
+      <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
+      <textarea id="msgInput" placeholder="Escreve o teu pedido… ou larga ficheiros/imagens na janela (Enter envia, Shift+Enter nova linha)"></textarea>
       <button class="primary" id="sendBtn" onclick="send()">Enviar</button>
       <button class="stop" id="stopBtn" onclick="stopGen()" hidden title="Parar o modelo agora (o servidor continua a correr)">⏹ Parar</button>
     </div>
@@ -218,6 +274,10 @@ async function refreshInfo() {
     $('statusTxt').textContent = txt;
     $('statusTxt').title = (d.gpu ? 'GPU: ' + d.gpu + ' — ' : '') + 'modo: ' + d.mode + (d.api ? ' (' + d.api + ')' : '');
     if (document.activeElement !== $('backendSel')) $('backendSel').value = d.mode;
+    const bits = ['· Thor'];
+    if (d.opencode) bits.push('+ OpenCode');
+    if (d.vision) bits.push('· 👁 vê imagens');
+    $('agentBadge').textContent = bits.join(' ');
   } catch { $('statusTxt').textContent = 'servidor em baixo'; }
 }
 let switching = false;
@@ -299,8 +359,9 @@ function welcomeHTML() {
     <div class="welcome">
       <h1>Thor Agent</h1>
       <p>
-        Chat offline com agente de ficheiros e terminal.<br>
-        Escolhe a pasta onde trabalhar, escreve o pedido, anexa ficheiros com 📎.
+        Chat offline com agente de ficheiros, terminal e visão.<br>
+        Escolhe a pasta onde trabalhar, escreve o pedido, e anexa com <b>＋</b>,
+        arrastando para a janela ou colando (Ctrl+V).
       </p>
       <p style="margin-top:18px">
         <button class="primary" onclick="pickFolder()">📂 Escolher pasta de trabalho</button>
@@ -465,23 +526,145 @@ function renderHistory(t, messages) {
   }
 }
 
-/* ================= uploads ================= */
-$('fileInput').addEventListener('change', async e => {
+/* ================= anexos: ficheiros, pasta, arrastar, colar ================= */
+const MAX_FILES = 40, MAX_SIZE = 10 * 1024 * 1024;
+
+/* --- menu "+" --- */
+function togglePlusMenu(e) { e.stopPropagation(); $('plusMenu').classList.toggle('on'); }
+function closePlusMenu() { $('plusMenu').classList.remove('on'); }
+document.addEventListener('click', e => { if (!$('plusWrap').contains(e.target)) closePlusMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePlusMenu(); });
+
+function pickFiles() { closePlusMenu(); $('fileInput').click(); }
+function pickFolderFiles() { closePlusMenu(); $('folderInput').click(); }
+
+async function pasteClipboard() {
+  closePlusMenu();
+  try {
+    const items = await navigator.clipboard.read();
+    const files = [];
+    for (const it of items) {
+      for (const type of it.types) {
+        if (!type.startsWith('image/')) continue;
+        const blob = await it.getType(type);
+        const ext = (type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        files.push(new File([blob], 'colado-' + Date.now() + '.' + ext, { type }));
+      }
+    }
+    if (files.length) { await addFiles(files); return; }
+  } catch { /* sem permissao: cai para a dica */ }
+  sys(active(), 'Cola com Ctrl+V (imagem ou ficheiros) por cima do campo de texto.');
+}
+
+/* --- leitura + envio ao servidor (partilhado por botao, pasta, arrastar, colar) --- */
+async function uploadOne(f) {
   const t = active();
-  for (const f of e.target.files) {
-    if (f.size > 10*1024*1024) { sys(t, 'Ficheiro demasiado grande: ' + f.name); continue; }
-    const data = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); });
-    try {
-      const r = await fetch('/api/upload', { method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({name: f.name, data}) });
-      const d = await r.json();
-      if (!d.ok) { sys(t, 'Upload falhou: ' + d.error); continue; }
-      t.attachments.push(d);
-      if (t.id === activeId) renderAttachBar();
-    } catch (err) { sys(t, 'Upload erro: ' + err); }
+  if (f.size > MAX_SIZE) { sys(t, 'Demasiado grande (max 10 MB): ' + f.name); return null; }
+  let data;
+  try {
+    data = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = () => rej(r.error);
+      r.readAsDataURL(f);
+    });
+  } catch (e) { sys(t, 'Nao foi possivel ler ' + f.name + ': ' + e); return null; }
+  try {
+    const r = await fetch('/api/upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: f.name, data })
+    });
+    const d = await r.json();
+    if (!d.ok) { sys(t, 'Upload falhou (' + f.name + '): ' + d.error); return null; }
+    if (d.kind === 'image' && data) {
+      d.thumb = data;                                  // miniatura no chip
+      d.mime = data.slice(5, data.indexOf(';')) || 'image/png';
+      d.raw = data.slice(data.indexOf(',') + 1);       // base64 puro -> modelo
+    }
+    return d;
+  } catch (err) { sys(t, 'Upload erro (' + f.name + '): ' + err); return null; }
+}
+
+async function addFiles(fileList) {
+  const t = active(); if (!t) return;
+  closePlusMenu();
+  let files = Array.from(fileList || []);
+  if (!files.length) return;
+  if (files.length > MAX_FILES) {
+    sys(t, 'Demasiados ficheiros (' + files.length + ') — a anexar os primeiros ' + MAX_FILES + '.');
+    files = files.slice(0, MAX_FILES);
   }
+  sys(t, 'A anexar ' + files.length + ' ficheiro' + (files.length > 1 ? 's' : '') + '…');
+  let n = 0, imgs = 0;
+  for (const f of files) {
+    const d = await uploadOne(f);
+    if (!d) continue;
+    t.attachments.push(d);
+    n++;
+    if (d.kind === 'image') imgs++;
+    if (t.id === activeId) renderAttachBar();
+  }
+  if (n) {
+    sys(t, n + ' anexado' + (n > 1 ? 's' : '')
+      + (imgs ? ' (' + imgs + ' imagem' + (imgs > 1 ? 'ns' : '') + ' que o modelo passa a ver)' : '')
+      + ' — escreve o pedido e envia.');
+  }
+}
+
+/* --- botao / pasta --- */
+$('fileInput').addEventListener('change', async e => {
+  await addFiles(e.target.files);
   e.target.value = '';
 });
+$('folderInput').addEventListener('change', async e => {
+  await addFiles(e.target.files);
+  e.target.value = '';
+});
+
+/* --- arrastar e largar por cima de TELA JANELA --- */
+function hasFiles(e) {
+  const dt = e.dataTransfer;
+  if (!dt || !dt.types) return false;
+  const types = Array.isArray(dt.types) ? dt.types : Array.from(dt.types);
+  return types.includes('Files');
+}
+let dragDepth = 0;
+document.addEventListener('dragenter', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  $('dropOverlay').classList.add('on');
+});
+document.addEventListener('dragover', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+});
+document.addEventListener('dragleave', e => {
+  if (!hasFiles(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) $('dropOverlay').classList.remove('on');
+});
+document.addEventListener('drop', async e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $('dropOverlay').classList.remove('on');
+  await addFiles(e.dataTransfer.files);
+});
+
+/* --- colar (Ctrl+V): imagem de screenshot ou ficheiros --- */
+document.addEventListener('paste', async e => {
+  const files = e.clipboardData && e.clipboardData.files;
+  if (files && files.length) { e.preventDefault(); await addFiles(files); }
+});
+
+function fmtBytes(n) {
+  if (!n) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(0) + ' kB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
 
 function renderAttachBar() {
   const t = active();
@@ -492,14 +675,33 @@ function renderAttachBar() {
   list.forEach((a, i) => {
     const c = document.createElement('span');
     c.className = 'filechip';
-    c.innerHTML = '<b>' + esc(a.name) + '</b>' + (a.kind==='image' ? ' 🖼' : ' ('+(a.chars||0)+' ch)')
-      + ' <span class="x" onclick="rmAttach('+i+')">✕</span>';
+    if (a.kind === 'image' && a.thumb) {
+      const im = document.createElement('img');
+      im.className = 'attachthumb';
+      im.src = a.thumb; im.alt = ''; im.title = a.name;
+      c.appendChild(im);
+    }
+    const b = document.createElement('b');
+    b.textContent = a.name;
+    b.title = a.path || a.name;
+    c.appendChild(b);
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = a.kind === 'image' ? '🖼'
+      : a.kind === 'text' ? '(' + (a.chars || 0) + ' ch)'
+      : a.kind === 'file' ? '(' + fmtBytes(a.bytes || 0) + ')'
+      : '';
+    c.appendChild(meta);
+    const x = document.createElement('span');
+    x.className = 'x'; x.textContent = '✕'; x.title = 'Remover anexo';
+    x.onclick = () => rmAttach(i);
+    c.appendChild(x);
     bar.appendChild(c);
   });
 }
 function rmAttach(i) {
   const t = active(); if (!t) return;
-  t.attachments.splice(i,1);
+  t.attachments.splice(i, 1);
   renderAttachBar();
 }
 
@@ -519,15 +721,21 @@ async function send() {
 
   let full = text;
   const names = [];
+  const atts = [];   // so as imagens: vao em base64 para o modelo VER
   for (const a of t.attachments) {
+    // IMPORTANTE: os marcadores levam o NOME, nunca o caminho absoluto.
+    // Um caminho Windows (C:\...) no texto do pedido era apanhado pelo
+    // extract_target_dir do servidor e mudava a pasta de trabalho do agente
+    // para dentro de .thor/uploads — sem o utilizador pedir.
     if (a.kind === 'image') {
-      full += '\n[Imagem anexada: ' + a.path + ']';
+      full += '\n[Imagem anexada: ' + a.name + ']';
       names.push(a.name + ' 🖼');
+      if (a.raw) atts.push({ kind: 'image', name: a.name, path: a.path, mime: a.mime, data: a.raw });
     } else if (a.content) {
       full += '\n\n--- Ficheiro: ' + a.name + ' ---\n' + a.content + '\n--- fim ---';
       names.push(a.name);
     } else if (a.path) {
-      full += '\n[Ficheiro: ' + a.path + ']';
+      full += '\n[Ficheiro: ' + a.name + ']';
       names.push(a.name);
     }
   }
@@ -547,7 +755,7 @@ async function send() {
   try {
     const resp = await fetch('/api/chat', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({message: full, session_id: t.id})
+      body: JSON.stringify({message: full, session_id: t.id, attachments: atts})
     });
     if (!resp.ok) {
       const err = await resp.json().catch(()=>({error:'HTTP '+resp.status}));
