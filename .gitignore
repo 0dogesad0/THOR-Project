@@ -18,6 +18,8 @@ opencode/node_modules/
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+venv/
 
 # windows / editores
 Thumbs.db

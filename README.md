@@ -8,7 +8,7 @@ Chat AI de coding **100% offline e portátil** para Windows — estilo opencode/
 
 ## Instalação do zero (vindo do GitHub)
 
-Tudo o que falta para o Thor ficar a funcionar — são **2 downloads** além do código:
+Tudo o que falta para o Thor ficar a funcionar — são **2 downloads** além do código e **1 setup rápido com internet** (passo 4):
 
 ### 1. Descarregar o código
 
@@ -29,7 +29,7 @@ Como extrair: cria a pasta correspondente dentro do projeto e descompacta **o co
 
 - **Mínimo para funcionar**: só o `runtime` (CPU) — corre em qualquer PC Windows.
 - **Com GPU**: extrai também os outros dois — o chat escolhe sozinho (CUDA → Vulkan → CPU).
-- Sem Python nenhum instalado? O `runtime` traz o Python portátil; se o teu zip não o incluir, instala [Python 3.12+](https://www.python.org/downloads/) que o `start.bat` também o deteta.
+- Sem Python nenhum instalado? O `runtime` traz o Python portátil; se o teu zip não o incluir, instala [Python 3.12+](https://www.python.org/downloads/) que o `start.bat` também o deteta. Depois corre `setup_python.bat` (passo 4) para o pandas/matplotlib.
 
 ### 3. Descarregar o modelo IA (~5.8 GB) — com visão
 
@@ -45,7 +45,19 @@ O modelo não cabe no git nem na release. Duplo-clique em **`install_model.bat`*
 - O `mmproj` é o **projetor de visão** — sem ele o chat funciona mas não vê imagens
 - Sem `install_model.bat`? Podes copiar os 2 ficheiros de outra instalação do Thor
 
-### 4. Correr
+### 4. Completar o Python (1 vez, com internet)
+
+O `runtime` traz o Python portátil sem `pandas`/`matplotlib` — o `setup_python.bat`
+instala-os **uma só vez** (download de ~25 MB) para os exercícios gerados pelo
+agente poderem correr offline a partir daí:
+
+```
+setup_python.bat
+```
+
+Se o teu `runtime` já incluir pandas e matplotlib, o script diz `[ok]` e não faz nada.
+
+### 5. Correr
 
 Duplo-clique em **`start.bat`** — o chat abre sozinho no navegador (`http://127.0.0.1:8090/`).
 
@@ -76,7 +88,7 @@ pelo modelo**; binarios ficam em `.thor/uploads/` e o agente opera-os por caminh
 | **Modelo IA** | `Qwen3-VL-8B-Instruct` (Q4_K_M, GGUF, 5.03 GB) + `mmproj` (0.75 GB) — **vê imagens**, tool calling e código |
 | **Runtime LLM** | llama.cpp `b11753`: **CUDA** (`runtime-gpu/`) + **Vulkan** (`runtime-vulkan/`) + **CPU** (`runtime/`) — o chat escolhe o melhor automaticamente (da release v1.0) |
 | **Motor de agente** | **Thor + OpenCode** em parceria (ver secção própria) — `opencode/` com o SDK embebido, 100% local |
-| **Python** | Python 3.12.10 embeddable (portátil, sem instalar) |
+| **Python** | Python 3.12.10 portátil (sem instalar) + `pandas` / `matplotlib` / `numpy` já instalados para os exercícios correrem offline |
 | **Interface** | Chat web no navegador (start.bat) + modo terminal CLI (start_cli.bat) — Python stdlib apenas |
 | **Portas locais** | `8080` = llama-server (modelo), `8090` = chat web — so acessiveis na tua maquina |
 | **Tamanho total** | ~7 GB (modelo + runtimes CPU+GPU + scripts) |
@@ -136,13 +148,7 @@ opencode\install.bat
 ```
 
 Instala o `bun.exe` portatil e os pacotes `@opencode/sdk` + `@opencode/ai`.
-
-Se o `runtime` vier sem pip (Python "embutido"), completa-o **uma vez** com
-internet para os exercícios poderem usar pandas/matplotlib offline depois:
-
-```
-setup_python.bat
-```
+(Para o pandas/matplotlib dos exercícios, usa o `setup_python.bat` do passo 4.)
 
 ### Como se garante que e offline
 
@@ -153,7 +159,7 @@ setup_python.bat
 | `opencode/host.ts` | **dados protegidos**: escrita em ficheiros de dados existentes (CSV/JSON/…) é negada (só leitura); qualquer ficheiro existente só pode ser alterado depois de **lido** pela sessão |
 | `models: { fetch: false }` | o OpenCode nao vai buscar a lista de modelos a models.dev |
 | env `OPENCODE_DISABLE_*` | desliga autoupdate, models fetch e share |
-| `opencode.json` | `share: "disabled"`, `update: "disable"`, permissoes `allow` (sem pedidos de aprovacao — quem aprova e o proprio Thor) |
+| `opencode.json` | `share: "disabled"`, `update: "disable"`, permissoes `allow` para o Thor (question/websearch negados) |
 | Modelo | llama-server so escuta em `127.0.0.1:8080` |
 
 No arranque o servidor imprime `Parceria ativa: Thor (recebe e distribui) + OpenCode (executa) — 100% local`.
@@ -329,7 +335,7 @@ thor-portable/
 │   ├── opencode.json    ← provider "thor" -> 127.0.0.1:8080, question/websearch negados
 │   ├── package.json     ← dependencias do host (@opencode/sdk, @opencode/ai)
 │   └── bun.lock         ← versoes congeladas (reproduzivel)
-├── runtime/             ← CPU: llama-server.exe + Python 3.12 portatil + DLLs
+├── runtime/             ← CPU: llama-server.exe + Python 3.12 + pandas/matplotlib
 ├── runtime-gpu/         ← GPU NVIDIA: llama-server.exe CUDA + cuBLAS (apagar = sem CUDA)
 └── runtime-vulkan/      ← GPU AMD/Intel/NVIDIA: llama-server.exe Vulkan (apagar = sem Vulkan)
 ```
@@ -355,7 +361,7 @@ Ficheiros gerados durante o uso (podes apagar quando quiseres):
 - Windows 10/11 x64 (ou superior)
 - ~8 GB de RAM livres (o modelo usa ~6 GB em CPU; na GPU fica na VRAM)
 - ~8 GB de disco livres (runtimes + modelo + projetor de visão)
-- **Não** precisa de: internet (a não ser para os 2 downloads de instalação), Python instalado, Visual C++, contas ou chaves de API
+- **Não** precisa de: internet (a não ser para os downloads de instalação — código, runtimes, modelo e o `setup_python.bat`), Python instalado, Visual C++, contas ou chaves de API
 - **Opcional**: GPU — NVIDIA (CUDA), AMD/Intel (Vulkan) com 8 GB+ VRAM e driver atual — aí corre ~10x mais rapido
 
 ---
