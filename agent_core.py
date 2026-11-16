@@ -601,6 +601,9 @@ DELEGAR
 Regras:
 - Saudações, perguntas conceptuais, explicações e conversa = DIRETO.
 - Criar/editar/ler/mover/executar ficheiros ou código, debugging e tarefas no projeto = DELEGAR.
+- Em exercícios (especialmente vindos de imagens): escreve na tarefa o CONTEXTO —
+  linguagem/tecnologia pedida, o que exatamente é pedido e os ficheiros de dados
+  envolvidos — para o OpenCode não inventar HTML onde se pede Python nem misturar.
 - Entre 1 e 3 passos; se for uma ação única, escreve só a tarefa sem passos.
 - Máximo 8 linhas, na língua do pedido.
 """
@@ -681,9 +684,16 @@ def vision_transcribe(images: list[dict[str, Any]]) -> str:
     sys_p = (
         "Transcreve TODO o conteúdo visível nesta imagem: texto, "
         "enunciados, exercícios, instruções, números, tabelas e estrutura. "
-        "Se for um enunciado de exercício (Python/HTML/Java/etc), transcreve "
-        "por completo o que é pedido, item a item. NÃO resolvas nem comentes: "
-        "apenas transcreve o que vês, de forma clara e organizada."
+        "Transcreve FIELMENTE o que está escrito — NÃO inventes, NÃO completes "
+        "e NÃO mistures tecnologias: se o enunciado pede Python, transcreve "
+        "Python; se pede HTML, transcreve HTML. "
+        "Se for um enunciado de exercício, transcreve-o por completo, item a "
+        "item, incluindo o nome das linguagens/ficheiros mencionados. "
+        "NÃO resolvas nem comentes. "
+        "No fim, acrescenta exatamente 3 linhas de resumo:\n"
+        "LINGUAGEM: <linguagem/tecnologia realmente pedida no enunciado>\n"
+        "PEDIDOS: <lista curta e concreta do que é pedido, por ordem>\n"
+        "DADOS: <ficheiros de dados mencionados/existentes, ou 'nenhum'>"
     )
     n = len(images)
     parts: list[str] = []
