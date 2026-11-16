@@ -237,7 +237,22 @@ def _try_spawn(kind: str, wait: int = 90) -> subprocess.Popen | None:
     # visão: o projetor multimodal (mmproj) é o que dá aos olhos do modelo.
     # sem ele o llama-server arranca na mesma mas ignora as imagens.
     mmproj = BASE_DIR / "model" / "mmproj.gguf"
-    vision_args = ["--mmproj", str(mmproj)] if mmproj.exists() else []
+    # Qwen3-VL: fotos de telemovel a resolucao nativa gastam 7k–8k tokens
+    # cada uma; sem teto, 2+ imagens estouram o contexto (HTTP 400). O teto
+    # por imagem faz o mtmd reduzir a grelha — 4 imagens cabem (~1280*4 + texto).
+    # -c 24576 (nao 8192): exercicios reais (ex.: SteamPulse, 17 opcoes) dao
+    # ficheiros de 10k+ tokens — em 8192 a compactacao do OpenCode era cortada
+    # a meio ("Compaction summary reached the output token limit") e as escritas
+    # grandes estouravam o limite de saida. Precisa de espaco para o enunciado
+    # transcrito + ficheiro grande + resumo de compactacao. ESPERA ~3.6 GB de
+    # KV cache (mais ~5 GB de pesos) — corre em maquinas com 16 GB de RAM.
+    vision_args: list[str] = []
+    if mmproj.exists():
+        vision_args = [
+            "--mmproj", str(mmproj),
+            "--image-min-tokens", "256",
+            "--image-max-tokens", "1280",
+        ]
     log_path = BASE_DIR / ".thor" / "llama_spawn.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -246,7 +261,7 @@ def _try_spawn(kind: str, wait: int = 90) -> subprocess.Popen | None:
         logf.flush()
         proc = subprocess.Popen(
             [str(exe), "-m", str(model), "--port", "8080", "--host", "127.0.0.1",
-             "-c", "8192", "--no-warmup", *vision_args, *extra],
+             "-c", "24576", "--no-warmup", *vision_args, *extra],
             cwd=str(BASE_DIR),
             stdout=logf, stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW,
@@ -660,18 +675,21 @@ class Handler(BaseHTTPRequestHandler):
         atts = atts if isinstance(atts, list) else []
         images: list[dict[str, Any]] = []
         att_paths: list[str] = []
+        img_paths: list[str] = []  # caminhos de IMAGEM: o OpenCode nao os ve (nao ler binario)
         for a in atts:
             if not isinstance(a, dict):
                 continue
             if a.get("path"):
                 att_paths.append(str(a["path"]))
+                if a.get("kind") == "image":
+                    img_paths.append(str(a["path"]))
             if a.get("kind") == "image" and a.get("data"):
                 images.append({
                     "name": str(a.get("name") or "imagem"),
                     "mime": str(a.get("mime") or "image/png"),
                     "data": str(a["data"]),
                 })
-        images = images[:8]  # 8 imagens max por pedido (contexto do modelo = 8192)
+        images = images[:8]  # 8 imagens max por pedido (contexto do modelo = 24576)
 
         sid, sess = get_session(str(body.get("session_id", "")))
         title = set_title_if_needed(sess, message)
@@ -774,6 +792,43 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+            # --- visao primeiro: o Thor le as imagens e passa o TEXTO ---
+            # O OpenCode nao ve pixels. Sem a transcricao lia JPEG como binario,
+            # chamava a ferramenta question e o watchdog abortava aos 180s.
+            vision_text = ""
+            if images:
+                emit({"type": "info", "content": "Thor: a ler as imagens anexadas…"})
+                try:
+                    vision_text = core.vision_transcribe(images)
+                except core.StopRequested:
+                    emit({"type": "stopped", "content": "⏹ interrompido pelo utilizador."})
+                    emit({"type": "done"})
+                    return
+                except Exception:
+                    vision_text = ""
+                if vision_text:
+                    emit({
+                        "type": "info",
+                        "content": f"Thor: enunciado transcrito ({len(vision_text)} chars) → OpenCode.",
+                    })
+                else:
+                    emit({
+                        "type": "info",
+                        "content": "Thor: não li as imagens a tempo — a tratar diretamente (visão no Thor).",
+                    })
+                    del sess["messages"][hist_mark:]
+                    n_delta = 0
+                    for ev in core.run_turn_events(sess["messages"], message, images=images):
+                        et = ev.get("type")
+                        if et == "delta":
+                            n_delta += 1
+                        log_ev(ev)
+                        emit(ev)
+                    if n_delta:
+                        print(f"[{time.strftime('%H:%M:%S')}]   texto do modelo: {n_delta} pedacos (stream)", flush=True)
+                    emit({"type": "done"})
+                    return
+
             delegating = True
             OC_ACTIVE_SID = sid
             acc = ""
@@ -787,13 +842,47 @@ class Handler(BaseHTTPRequestHandler):
                         task_text = f"{message}\n\n---\nTarefa atribuída pelo Thor ao OpenCode:\n{task}"
                         if n > 1:
                             task_text += f"\nPasso 1: {steps[0]}"
-                        if att_paths:
-                            # o OpenCode nao recebe pixels: recebe os caminhos e
-                            # abre os anexos com as proprias ferramentas de leitura
+                        if vision_text:
+                            task_text += (
+                                "\n\nConteúdo lido das imagens anexadas (transcrito "
+                                "pelo Thor — este TEXTO é o enunciado; implementa-o):\n"
+                                + vision_text
+                            )
+                        py = sys.executable
+                        task_text += (
+                            "\n\nRegras obrigatórias:\n"
+                            "- NÃO uses a ferramenta question nem peças confirmação ao utilizador.\n"
+                            "- NÃO leias ficheiros .jpg/.jpeg/.png/.webp/.gif — são imagens; "
+                            "o enunciado já está transcrito acima.\n"
+                            "- 100% OFFLINE: proibido internet e instalações (curl, wget, pip "
+                            "install, winget, downloads). Usa só o Python do projeto: \""
+                            + py
+                            + "\" e as bibliotecas já instaladas.\n"
+                            "- Ficheiros de dados existentes (CSV, JSON, etc.) são SÓ LEITURA: "
+                            "lê-os e trabalha com eles — nunca os modifiques nem apagues. "
+                            "Se precisares de gravar resultados, cria um ficheiro NOVO com "
+                            "outro nome.\n"
+                            "- Implementa AGORA o exercício completo na pasta de trabalho atual "
+                            "(cria todos os ficheiros pedidos: código, CSV, HTML, etc.).\n"
+                            "- Cada ficheiro numa write_file separada. Se um ficheiro for MUITO "
+                            "grande (mais de ~500 linhas), cria primeiro a estrutura + as "
+                            "primeiras opções e acrescenta o resto em blocos com edit_file — "
+                            "NUNCA tentes gerar o ficheiro inteiro numa só chamada.\n"
+                            "- Não repitas nem reescrevas conteúdo já escrito.\n"
+                            "- O conteúdo de cada ficheiro é TEXTO PURO (código, CSV…) — "
+                            "nunca envolvas em ``` nem escrevas markdown dentro do ficheiro.\n"
+                            "- Antes de terminares, valida cada .py criado com: \""
+                            + py
+                            + "\" -m py_compile <ficheiro> e corrige qualquer erro encontrado."
+                        )
+                        # so os NAO-imagem vao para "abre com as tuas ferramentas":
+                        # ler um .jpeg como texto dava lixo binario ao agente.
+                        file_paths = [p for p in att_paths if p not in img_paths]
+                        if file_paths:
                             task_text += (
                                 "\n\nAnexos do utilizador (estao em disco — "
                                 "abre-os com as tuas ferramentas de leitura):\n"
-                                + "\n".join(att_paths)
+                                + "\n".join(file_paths)
                             )
                     else:
                         task_text = f"Passo {i} de {n}: {step}"

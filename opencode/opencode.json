@@ -6,6 +6,8 @@
   "update": "disable",
   "snapshots": true,
   "permissions": [
+    { "action": "question", "resource": "*", "effect": "deny" },
+    { "action": "websearch", "resource": "*", "effect": "deny" },
     { "action": "*", "resource": "*", "effect": "allow" }
   ],
   "providers": {
@@ -18,10 +20,10 @@
       },
       "models": {
         "model": {
-          "name": "Qwen2.5-Coder-7B (local)",
+          "name": "Qwen3-VL-8B-Instruct (local)",
           "modelID": "model",
           "capabilities": { "tools": true },
-          "limit": { "context": 8192, "output": 2048 }
+          "limit": { "context": 24576, "output": 8192 }
         }
       }
     }

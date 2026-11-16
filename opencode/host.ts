@@ -17,6 +17,15 @@ import { OpenCode } from "@opencode/sdk"
 
 const HERE = import.meta.dir
 
+/* O Python do projeto (runtime/) passa a ser o PRIMEIRO do PATH: o "python"
+ * do shell do agente e sempre o do Thor (com pandas/matplotlib), nunca o
+ * alias da Microsoft Store nem um Python qualquer da maquina. */
+const THOR_RUNTIME = HERE + "/../runtime"
+const curPath = process.env.PATH || process.env.Path || ""
+if (!curPath.toLowerCase().startsWith(THOR_RUNTIME.toLowerCase())) {
+  process.env.PATH = THOR_RUNTIME + ";" + curPath
+}
+
 /* ---------------- saida ---------------- */
 function send(o: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(o) + "\n")
@@ -75,22 +84,156 @@ try {
   process.exit(1)
 }
 
-/* ---------------- permissoes: allow automatico (parceria sem UI) ------------
+/* ---------------- permissoes + guardas (parceria sem UI) -------------------
  * O host embebido nao tem interface para responder a pedidos "ask": sem isto,
  * qualquer ferramenta que precise de aprovacao fica a espera para sempre e o
  * turno morre em silencio. O hook corre depois das regras do opencode.json e
- * forca "allow" — o Thor e quem distribui, por isso quem aprova e o proprio
- * Thor (100% local, sem prompts de UI). */
+ * decide a permissao de cada acao:
+ *
+ *  - allow por omissao (o Thor e quem distribui, por isso quem aprova e o
+ *    proprio Thor — 100% local, sem prompts de UI);
+ *  - DENY "question"/"websearch": usam forms.ask que no modo embebido
+ *    bloqueia o turno ate ao watchdog;
+ *  - DENY comandos shell de rede/instalacao/alteracao ao sistema: garante o
+ *    modo offline verdadeiro mesmo via subprocessos (o guarda de fetch so
+ *    cobre o SDK, nao a ferramenta shell);
+ *  - DENY escrita em ficheiros de dados existentes (CSV, JSON, …): os dados
+ *    do utilizador sao apenas de LEITURA — o agente trabalha com eles, nunca
+ *    os modifica nem substitui;
+ *  - DENY alteracao de qualquer ficheiro existente ainda nao lido pela sessao
+ *    (regra "le primeiro"): previne destruicao cega sem depender de metadata;
+ *    ficheiros novos e os criados pela propria sessao passam sempre. */
+const fs = await import("node:fs")
+const path = await import("node:path")
+
+const DATA_EXT = new Set([
+  ".csv", ".tsv", ".xlsx", ".xls", ".json", ".jsonl", ".db", ".sqlite",
+  ".sqlite3", ".parquet", ".pkl", ".pickle", ".dat", ".xml", ".yaml", ".yml",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".rar", ".7z",
+  ".txt", ".md",
+])
+
+/* comandos shell proibidos: internet, instalacoes e mudancas ao sistema.
+ * "localhost/127.0.0.1" no mesmo comando e permitido (testes locais). */
+const NET_RULES: Array<[RegExp, string]> = [
+  [
+    /\b(?:curl|wget|invoke-webrequest|iwr|invoke-restmethod|irm|bitsadmin|certutil|start-bitstransfer|downloadstring|downloadfile|ping|nslookup|tracert|telnet)\b(?![^;&|]*\b(?:127\.0\.0\.1|localhost)\b)/i,
+    "acesso a internet",
+  ],
+  [/\b(?:winget|choco|scoop|conda|pip3?|pipx)\s+(?:install|download|upgrade|update|uninstall)\b/i, "instalacao de pacotes"],
+  [/-m\s+pip\b/i, "instalacao de pacotes"],
+  [/\b(?:npm|pnpm|yarn)\s+(?:install|ci|i|add|update)\b/i, "instalacao de pacotes"],
+  [/\b(?:go)\s+(?:get|install)\b/i, "instalacao de pacotes"],
+  [/\b(?:cargo|gem|apt|apt-get|yum|dnf|pacman|apk)\s+(?:install|add|get)\b/i, "instalacao de pacotes"],
+  [/\b(?:mvn|gradle)\s+\w/i, "build que precisa de internet"],
+  [/\bgit\s+(?:clone|pull|fetch|push)\b/i, "rede git"],
+  [/\b(?:setx|netsh|schtasks|msiexec|rundll32|reg\s+(?:add|delete|import))\b/i, "alteracao do sistema"],
+  [/ms-store:/i, "instalacao de pacotes (Microsoft Store)"],
+  [/https?:\/\/(?!127\.0\.0\.1|localhost|\[::1\])/i, "URL externa"],
+]
+
+type FileSets = { created: Set<string>; read: Set<string> }
+const fileSets = new Map<string, FileSets>() // sid Thor -> ficheiros da sessao
+
+function setsOf(id: string): FileSets {
+  let s = fileSets.get(id)
+  if (!s) {
+    s = { created: new Set(), read: new Set() }
+    fileSets.set(id, s)
+  }
+  return s
+}
+function dirFor(sessionID: string): string {
+  // sidByOc/bySid sao declarados mais abaixo; o hook so corre em runtime
+  const t = sidByOc.get(sessionID)
+  const e = t ? bySid.get(t) : undefined
+  return (e && e.dir) || process.cwd()
+}
+function fkey(dir: string, res: string): string {
+  return path.resolve(dir, String(res)).toLowerCase()
+}
+
 try {
   await oc.plugin({
     id: "thor-auto-allow",
     setup: async (ctx) => {
       await ctx.permission.hook("evaluate", (input) => {
+        const act = String(input.action || "")
+
+        // 1) forms que bloqueiam o turno sem UI
+        if (act === "question" || act === "websearch") {
+          input.effect = "deny"
+          input.message = "offline: " + act + " desativado no Thor (sem UI para responder)"
+          return
+        }
+
+        // 2) shell:100% offline — nada de internet, instalacoes ou sistema
+        if (act === "shell") {
+          for (const raw of input.resources) {
+            const cmd = String(raw)
+            for (const [re, why] of NET_RULES) {
+              if (re.test(cmd)) {
+                input.effect = "deny"
+                input.message =
+                  "Thor (offline): comando bloqueado — " + why +
+                  ". So e permitido trabalho local; sem internet, sem instalar programas e sem alterar o sistema/PATH."
+                log("[guarda] shell negado (" + why + "): " + cmd.slice(0, 160))
+                return
+              }
+            }
+          }
+        }
+
+        // 3) leituras: registar (habilita edicao posterior de codigo)
+        if (act === "read") {
+          const st = setsOf(sidByOc.get(input.sessionID) || input.sessionID)
+          const dir = dirFor(input.sessionID)
+          for (const res of input.resources) st.read.add(fkey(dir, res))
+        } else if (act === "edit") {
+          // 4) escrita/edicao: dados do utilizador protegidos
+          const st = setsOf(sidByOc.get(input.sessionID) || input.sessionID)
+          const dir = dirFor(input.sessionID)
+          for (const res of input.resources) {
+            const abs = path.resolve(dir, String(res))
+            const k = abs.toLowerCase()
+            let exists = false
+            try {
+              exists = fs.existsSync(abs)
+            } catch {}
+            if (!exists) {
+              st.created.add(k)
+              continue
+            }
+            if (st.created.has(k)) continue // ficheiro desta sessao: itera a vontade
+            if (DATA_EXT.has(path.extname(abs).toLowerCase())) {
+              input.effect = "deny"
+              input.message =
+                "Thor: '" + res + "' e um ficheiro de dados existente — apenas LEITURA. " +
+                "Le-o e trabalha com ele, mas nao o modifies nem sobrescrevas; " +
+                "para gravar resultados cria um ficheiro NOVO com outro nome."
+              log("[guarda] escrita negada (dados): " + res)
+              return
+            }
+            if (!st.read.has(k)) {
+              input.effect = "deny"
+              input.message =
+                "Thor: '" + res + "' ja existe e ainda nao foi lido nesta sessao. " +
+                "Le-o primeiro (read) e depois sim podes altera-lo (edit). " +
+                "write_file so cria ficheiros novos."
+              log("[guarda] edit negado (nao lido): " + res)
+              return
+            }
+          }
+          for (const res of input.resources) st.created.add(fkey(dir, res))
+        }
+
         input.effect = "allow"
       })
     },
   })
-  log("plugin thor-auto-allow ativo (permissoes: allow)")
+  log(
+    "plugin thor-auto-allow ativo (allow; question/websearch/shell-offline/dados: deny)",
+  )
 } catch (e) {
   log("plugin thor-auto-allow falhou: " + String(e))
 }
@@ -173,6 +316,46 @@ function toolResult(d: any, failed: boolean): void {
   tools.delete(d.id)
 }
 
+/* ---------------- forms: resposta automatica (nunca bloquear) --------------
+ * Qualquer formulario que o OpenCode abra (question, websearch, elicitação
+ * MCP…) espera uma resposta humana que no modo embebido nao existe. Sem isto,
+ * forms.ask fica a espera ate ao watchdog. Responde com valores por omissao;
+ * se a resposta for invalida, cancela — ambos os casos desbloqueiam a
+ * ferramenta em vez de deixar o turno preso. */
+function defaultAnswer(fields: any[]): Record<string, any> {
+  const ans: Record<string, any> = {}
+  for (const f of fields || []) {
+    if (!f || !f.key) continue
+    if (f.type === "boolean") ans[f.key] = false
+    else if (f.type === "number" || f.type === "integer") ans[f.key] = 0
+    else if (f.type === "multiselect") {
+      const opts = f.options || []
+      ans[f.key] = opts.length ? [String(opts[0]?.value ?? opts[0])] : []
+    } else if (f.type === "string") {
+      const opts = f.options || []
+      if (opts.length) ans[f.key] = String(opts[0]?.value ?? opts[0])
+      else if (f.default !== undefined && f.default !== null) ans[f.key] = f.default
+      else ans[f.key] = f.required ? "sim" : ""
+    }
+    // "external" nao tem resposta simples — deixa ausente (cancela depois)
+  }
+  return ans
+}
+
+function autoAnswerForm(form: any): void {
+  const fsid = form.sessionID
+  const fid = form.id
+  const kind = (form.metadata && form.metadata.kind) || "?"
+  const ans = defaultAnswer(form.fields || [])
+  log("form.created " + fid + " kind=" + kind + " -> resposta automatica " + JSON.stringify(ans))
+  Promise.resolve()
+    .then(() => oc.sessions.form.reply({ sessionID: fsid, formID: fid, answer: ans }))
+    .catch(() =>
+      oc.sessions.form.cancel({ sessionID: fsid, formID: fid, message: "Thor: sem UI — formulário cancelado automaticamente." }),
+    )
+    .catch((e) => log("form reply/cancel falhou: " + String(e)))
+}
+
 /* ---------------- eventos do OpenCode -> eventos Thor ---------------- */
 function handle(ev: any): void {
   const t: string = ev && ev.type
@@ -244,13 +427,37 @@ function handle(ev: any): void {
       // fallback: algumas versoes emitem idle; qualquer dos dois fecha o turno
       if (isRoot(d.sessionID)) emit(d.sessionID, { ev: "done" })
       break
-    case "permission.asked":
-      // nao deveria chegar com o plugin thor-auto-allow; se chegar, regista e avisa
-      log("permission.asked " + d.action + " (sem resposta — o plugin devia ter dado allow)")
+    case "permission.asked": {
+      const act = String(d.action || "")
+      log("permission.asked " + act + " — a responder automaticamente")
+      const deny = act === "question" || act === "websearch"
+      const reply = (oc as any)?.permission?.reply
+      if (typeof reply === "function") {
+        Promise.resolve()
+          .then(() =>
+            reply.call((oc as any).permission, {
+              requestID: d.requestID || d.id,
+              sessionID: d.sessionID,
+              action: act,
+              effect: deny ? "deny" : "allow",
+            }),
+          )
+          .catch((e: any) => log("permission.reply falhou: " + String(e)))
+      } else {
+        log("permission.asked sem API de reply (plugin deveria ter " + (deny ? "deny" : "allow") + ")")
+      }
       emit(d.sessionID, {
         ev: "info",
-        content: "permissao pedida (" + d.action + ") — allow automatico em atraso",
+        content: deny
+          ? "permissao " + act + " negada (sem UI no Thor)"
+          : "permissao " + act + " — allow automatico",
       })
+      break
+    }
+    case "form.created":
+      // qualquer formulario abre um forms.ask que bloqueia sem resposta:
+      // responde/cancela de imediato para o turno nunca ficar preso
+      if (d.form && d.form.id && d.form.sessionID) autoAnswerForm(d.form)
       break
     default:
       // registo de diagnóstico: qualquer evento nao mapeado aparece no log

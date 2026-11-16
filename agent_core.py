@@ -172,7 +172,7 @@ def chat_stream(
     *,
     system: str | None = None,
     tools: bool = True,
-    max_tokens: int = 1536,
+    max_tokens: int = 4096,
 ) -> Iterator[dict[str, Any]]:
     """Gera {"delta": texto}* seguido de {"message": {...}}. Emite StopRequested se pedirem paragem.
 
@@ -183,7 +183,7 @@ def chat_stream(
     e integração final) correm sem ferramentas e com poucos tokens."""
     openai_msgs: list[dict[str, Any]] = [{"role": "system", "content": system or SYSTEM_PROMPT}]
     # imagens SO na mensagem mais recenta que as tem: cada imagem custa ~1k
-    # tokens e o contexto tem 8192 — reenviar as antigas a cada turno enche-o.
+    # tokens e o contexto e limitado — reenviar as antigas a cada turno enche-o.
     img_owner: dict[str, Any] | None = None
     for m in messages:
         if m.get("images"):
@@ -234,6 +234,20 @@ def chat_stream(
             req = urllib.request.Request(url, data=data_bytes, headers={"Content-Type": "application/json"})
             resp = urllib.request.urlopen(req, timeout=600)
             break
+        except urllib.error.HTTPError as e:
+            last_err = e
+            # 400/413 = pedido invalido (ex.: imagens a estourar o contexto) —
+            # repetir 3x so gasta tempo e nao resolve.
+            if e.code in (400, 401, 403, 404, 413, 422):
+                raise RuntimeError(
+                    f"Falha ao contactar llama-server em {HOST}. Detalhe: {e}"
+                ) from e
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise RuntimeError(
+                f"Falha ao contactar llama-server em {HOST}. Detalhe: {last_err}"
+            ) from last_err
         except (urllib.error.URLError, ConnectionResetError, ConnectionAbortedError,
                 BrokenPipeError, TimeoutError, OSError) as e:
             last_err = e
@@ -608,17 +622,20 @@ def dispatch(user_text: str, can_delegate: bool = True, context: str = "",
     distribui a tarefa ao OpenCode (delegate -> task + steps).
     Falha em seguranca para "direct": em erro, o Thor trata do pedido ele proprio.
 
-    `has_images`: com imagens anexadas o Thor prefere tratar ele proprio, para
-    os pixels irem directamente ao modelo (o OpenCode recebe os CAMINHOS, nao os
-    pixels — ver a construcao do task em server.py)."""
+    `has_images`: o Thor VE as imagens. Se o pedido for so descrever, responde
+    DIRETO. Se for FAZER o exercicio/codigo a partir das fotos, DELEGA — o Thor
+    transcreve o enunciado e o OpenCode executa sobre o TEXTO (nao sobre pixels)."""
     sys_p = ORCHESTRATOR_SYS
     if not can_delegate:
         sys_p += "\nAVISO: o OpenCode esta indisponivel agora — responde sempre DIRETO."
     elif has_images:
-        sys_p += ("\nAVISO: ha imagens anexadas a este pedido. Se a tarefa for SO sobre "
-                  "ver/descrever/comparar imagens, responde DIRETO (tu e que as ves). "
-                  "Se for sobretudo escrever codigo nos ficheiros citados, podes DELEGAR "
-                  "e menciona os caminhos das imagens na tarefa.")
+        sys_p += (
+            "\nAVISO: ha imagens anexadas. Tu (Thor) ves os pixels; o OpenCode nao. "
+            "Se o utilizador so pergunta o que se ve / pede explicacao = DIRETO. "
+            "Se pede para FAZER exercicios, criar codigo, CSV, HTML, Java, Python "
+            "ou qualquer ficheiro a partir das imagens = DELEGAR. Nao pecas ao "
+            "OpenCode que leia os JPEG/PNG: o Thor transcreve o enunciado antes."
+        )
     user = user_text
     if context:
         user = f"Conversa recente:\n{context}\n\nPedido atual:\n{user_text}"
@@ -647,6 +664,51 @@ def dispatch(user_text: str, can_delegate: bool = True, context: str = "",
         steps = steps[:3] or [task]
         return {"action": "delegate", "task": task, "steps": steps}
     return {"action": "direct"}
+
+
+def vision_transcribe(images: list[dict[str, Any]]) -> str:
+    """Le as imagens anexadas (OCR + enunciado) e devolve o texto.
+
+    Usado ANTES de delegar ao OpenCode: ele nao ve pixels (so recebe caminhos),
+    por isso o Thor le primeiro e passa o TEXTO da tarefa — a parceria mantem-se
+    (Thor recebe/distribui, OpenCode executa). Devolve "" em falha/paragem.
+
+    Uma imagem de telemovel a resolucao nativa pode gastar 7k+ tokens; 4 de
+    uma vez estouram o contexto do modelo. Por isso le UMA de cada vez.
+    """
+    if not images:
+        return ""
+    sys_p = (
+        "Transcreve TODO o conteúdo visível nesta imagem: texto, "
+        "enunciados, exercícios, instruções, números, tabelas e estrutura. "
+        "Se for um enunciado de exercício (Python/HTML/Java/etc), transcreve "
+        "por completo o que é pedido, item a item. NÃO resolvas nem comentes: "
+        "apenas transcreve o que vês, de forma clara e organizada."
+    )
+    n = len(images)
+    parts: list[str] = []
+    for i, im in enumerate(images, 1):
+        if STOP_EVENT.is_set():
+            raise StopRequested()
+        msgs: list[dict[str, Any]] = [{
+            "role": "user",
+            "content": f"Transcreve o conteúdo visível da imagem {i} de {n}:",
+            "images": [im],
+        }]
+        out: list[str] = []
+        try:
+            for item in chat_stream(msgs, system=sys_p, tools=False, max_tokens=1024):
+                if "delta" in item:
+                    out.append(item["delta"])
+        except StopRequested:
+            raise
+        except Exception as e:
+            print(f"[vision] imagem {i}/{n} falhou: {e}", flush=True)
+            continue
+        text = "".join(out).strip()
+        if text:
+            parts.append(f"--- imagem {i} de {n} ---\n{text}")
+    return "\n\n".join(parts)
 
 
 def integrate_events(user_text: str, work: str) -> Iterator[dict[str, Any]]:

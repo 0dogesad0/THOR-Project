@@ -113,6 +113,14 @@ tu escreves o pedido
   sempre com o Thor — nunca precisas de escolher "um ou outro".
 - Se o OpenCode falhar ou nao estiver instalado, **o Thor assume a tarefa ele
   proprio** (o pedido nunca fica por atender).
+- **Fotos de exercícios** (Python/HTML/Java, etc.): o Thor **lê as imagens**
+  (OCR, uma de cada vez para caberem no contexto), transcreve o enunciado
+  e entrega o **texto** ao OpenCode. O OpenCode executa o exercício (cria os
+  ficheiros) — não tenta ler JPEG/PNG como código. Depois de criar, **valida
+  cada `.py` com `py_compile`** e corrige os erros antes de terminar.
+- **Os teus dados são só leitura**: o agente pode *ler* e trabalhar com os
+  ficheiros de dados existentes (CSV, JSON, …), mas **nunca os modifica nem
+  apaga** — resultados novos vão sempre para ficheiros com outro nome.
 - Tudo passa pelos **mesmos eventos SSE de sempre** (`start`, `delta`,
   `tool_start`, `tool_result`, `info`, `error`, `stopped`, `done`) — o ⏹ Parar,
   os separadores e o historico continuam a funcionar igual.
@@ -129,11 +137,20 @@ opencode\install.bat
 
 Instala o `bun.exe` portatil e os pacotes `@opencode/sdk` + `@opencode/ai`.
 
+Se o `runtime` vier sem pip (Python "embutido"), completa-o **uma vez** com
+internet para os exercícios poderem usar pandas/matplotlib offline depois:
+
+```
+setup_python.bat
+```
+
 ### Como se garante que e offline
 
 | Camada | Garantia |
 |---|---|
 | `opencode/host.ts` | **guarda de fetch** injetada: so deixa `127.0.0.1` / `localhost` / `::1` — tudo o resto devolve `503` e fica registado no log |
+| `opencode/host.ts` | **guarda de shell**: comandos de rede/instalação/sistema (`curl`, `pip install`, `winget`, `setx`, URLs externas…) são **negados mesmo em subprocessos** — o fetch so cobre o SDK |
+| `opencode/host.ts` | **dados protegidos**: escrita em ficheiros de dados existentes (CSV/JSON/…) é negada (só leitura); qualquer ficheiro existente só pode ser alterado depois de **lido** pela sessão |
 | `models: { fetch: false }` | o OpenCode nao vai buscar a lista de modelos a models.dev |
 | env `OPENCODE_DISABLE_*` | desliga autoupdate, models fetch e share |
 | `opencode.json` | `share: "disabled"`, `update: "disable"`, permissoes `allow` (sem pedidos de aprovacao — quem aprova e o proprio Thor) |
@@ -266,6 +283,8 @@ Abrido pelo `start.bat` em `http://127.0.0.1:8090/`:
   (com miniatura no chip do anexo) e binários ficam em `.thor/uploads/`.
 - **Leitura de imagens** — o modelo descreve, lê texto/OCR, compara e raciocina
   sobre as imagens que enviares. Podes anexar várias de uma vez (até 8 por pedido).
+  Se pedires para **fazer** o exercício das fotos, o Thor transcreve e o OpenCode
+  implementa (parceria); se só perguntares o que se vê, o Thor responde direto.
 - **Estado do modelo** (verde = pronto) + **seletor Motor** (Auto/GPU/CPU — ver seccao acima).
 - Se o llama-server morrer a meio, o chat **reinicia-o automaticamente** no modo escolhido.
 
@@ -293,6 +312,7 @@ thor-portable/
 ├── start.bat            ← entrada: chat web (abre no navegador; o modelo e gerido pelo server.py)
 ├── start_cli.bat        ← modo terminal (CLI)
 ├── install_model.bat    ← 1x: descarrega o modelo Qwen3-VL + projetor de visao (~5.8 GB)
+├── setup_python.bat     ← 1x (com internet): Python completo + pandas/matplotlib no runtime
 ├── agent_core.py        ← nucleo do agente (streaming, tool calling, visao, parceria)
 ├── agent.py             ← loop do chat em terminal (usa agent_core)
 ├── server.py            ← servidor HTTP (API + backends CPU/GPU + uploads + SSE + parceria)
@@ -305,8 +325,8 @@ thor-portable/
 │   └── textonly.gguf    ← (opcional) modelo antigo so-texto, backup
 ├── opencode/            ← motor OpenCode embebido (opencode/install.bat 1x)
 │   ├── install.bat      ← instala bun + @opencode/sdk + @opencode/ai
-│   ├── host.ts          ← host embebido: protocolo stdio + guarda de rede offline
-│   ├── opencode.json    ← provider "thor" -> 127.0.0.1:8080, permissoes allow
+│   ├── host.ts          ← host embebido: stdio + guarda offline + protecao de dados
+│   ├── opencode.json    ← provider "thor" -> 127.0.0.1:8080, question/websearch negados
 │   ├── package.json     ← dependencias do host (@opencode/sdk, @opencode/ai)
 │   └── bun.lock         ← versoes congeladas (reproduzivel)
 ├── runtime/             ← CPU: llama-server.exe + Python 3.12 portatil + DLLs

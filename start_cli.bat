@@ -29,7 +29,7 @@ powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'http://127.0.0.1:%
 if not errorlevel 1 goto llama_ok
 
 echo A arrancar llama-server no puerto %PORT% (16 threads)...
-start "Thor llama-server" /min "%LLAMA%" -m "%MODEL%" --port %PORT% --host 127.0.0.1 -c 8192 --no-warmup -t 16
+start "Thor llama-server" /min "%LLAMA%" -m "%MODEL%" --port %PORT% --host 127.0.0.1 -c 24576 --no-warmup -t 16
 set SPAWNED_LLAMA=1
 
 echo A aguardar o modelo carregar...
