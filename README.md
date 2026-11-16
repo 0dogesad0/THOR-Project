@@ -17,15 +17,18 @@ Tudo o que falta para o Thor ficar a funcionar — são **2 downloads** além do
 
 ### 2. Descarregar os runtimes (release v1.0)
 
-Na página do repo, vai a **Releases → v1.0 → Assets** e descarrega os ficheiros:
+Na página do repo, vai a **Releases → v1.0 → Assets** e descarrega **`runtimes.zip`**
+(~644 MB — contém os 3 runtimes de uma vez):
 
-| Asset (zip) | Contém | Onde extrair |
+| O que vem no zip | Pasta | Onde extrair |
 |---|---|---|
-| `runtime…zip` | llama.cpp CPU **+ Python portátil** | pasta `runtime/` (obrigatório — sem ele nada corre) |
-| `runtime-gpu…zip` | llama.cpp CUDA (NVIDIA) | pasta `runtime-gpu/` (opcional) |
-| `runtime-vulkan…zip` | llama.cpp Vulkan (AMD/Intel) | pasta `runtime-vulkan/` (opcional) |
+| llama.cpp CPU + Python portátil | `runtime/` | **obrigatório — sem ele nada corre** |
+| llama.cpp CUDA (NVIDIA) | `runtime-gpu/` | opcional |
+| llama.cpp Vulkan (AMD/Intel) | `runtime-vulkan/` | opcional |
 
-Como extrair: cria a pasta correspondente dentro do projeto e descompacta **o conteúdo do zip lá dentro** — no fim tens `runtime\llama-server.exe`, `runtime\python.exe`, etc.
+Como extrair: descompacta **o conteúdo do zip na raiz do projeto** — no fim tens
+`runtime\llama-server.exe`, `runtime\python.exe`, etc. (e as pastas `runtime-gpu/`
+e `runtime-vulkan/` ao lado, se as quiseres).
 
 - **Mínimo para funcionar**: só o `runtime` (CPU) — corre em qualquer PC Windows.
 - **Com GPU**: extrai também os outros dois — o chat escolhe sozinho (CUDA → Vulkan → CPU).
