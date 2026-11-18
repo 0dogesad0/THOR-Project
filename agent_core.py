@@ -616,6 +616,10 @@ Regras:
 - Em exercícios (especialmente vindos de imagens): escreve na tarefa o CONTEXTO —
   linguagem/tecnologia pedida, o que exatamente é pedido e os ficheiros de dados
   envolvidos — para o OpenCode não inventar HTML onde se pede Python nem misturar.
+  Inclui sempre: (a) seguir o enunciado item a item / grelha de avaliação;
+  (b) LER primeiro os dados existentes (estrutura real, sem assumir);
+  (c) os ficheiros já existentes são do utilizador — trabalhar COM eles, nunca
+  modificá-los; resultados só em ficheiros novos.
 - Entre 1 e 3 passos; se for uma ação única, escreve só a tarefa sem passos.
 - Máximo 8 linhas, na língua do pedido.
 """
