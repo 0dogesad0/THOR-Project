@@ -219,15 +219,19 @@ def current_backend() -> str | None:
 
 def _try_spawn(kind: str, wait: int = 90) -> subprocess.Popen | None:
     model = BASE_DIR / "model" / "model.gguf"
+    # RAM: -cram 3072 limita a cache de prefixos/KV em RAM (default 8192 MiB
+    # = 8 GB! era o principal consumidor de RAM do processo) e -lm none troca
+    # o mmap por leitura direta: com GPU, os pesos vao para a VRAM e a pagina
+    # do modelo deixa de ficar residente em RAM (~5 GB a menos).
     if kind == "cuda":
         exe = BASE_DIR / "runtime-gpu" / "llama-server.exe"
-        extra = ["-ngl", "99", "-t", "8", "-np", "1"]
+        extra = ["-ngl", "99", "-t", "8", "-np", "1", "-cram", "3072", "-lm", "none"]
     elif kind == "vulkan":
         exe = BASE_DIR / "runtime-vulkan" / "llama-server.exe"
-        extra = ["-ngl", "99", "-t", "8", "-np", "1"]
+        extra = ["-ngl", "99", "-t", "8", "-np", "1", "-cram", "3072", "-lm", "none"]
     else:
         exe = BASE_DIR / "runtime" / "llama-server.exe"
-        extra = ["-t", "16", "-np", "1"]
+        extra = ["-t", "16", "-np", "1", "-cram", "3072"]
     # -np 1: UMA slot activa — o OpenCode faz chamadas paralelas ao modelo
     # (prompt principal + auxiliar tipo título) e com slots múltiplas a GPU
     # esmagava-se (prompt eval de 197s, geração a 0.04 t/s). Com 1 slot
@@ -850,14 +854,34 @@ class Handler(BaseHTTPRequestHandler):
                             )
                         py = sys.executable
                         task_text += (
-                            "\n\nRegras obrigatórias:\n"
+                            "\n\nMÉTODO DE TRABALHO (obrigatório, é assim que trabalhas):\n"
+                            "1. PERCEBE o pedido ao detalhe — lê o enunciado/item a item e "
+                            "faz EXATAMENTE o que é pedido, nem mais nem menos. O utilizador "
+                            "é a especificação: não inventes requisitos nem acrescentos.\n"
+                            "2. CONTEXTO primeiro — lê os ficheiros/dados que já existem "
+                            "antes de decidir; trabalha com o que existe, não com o que "
+                            "imaginas.\n"
+                            "3. PLANA em 1-2 linhas (linguagem, ficheiros EXATOS a criar, "
+                            "itens) e depois executa.\n"
+                            "4. MENOS É MAIS — cria só os ficheiros pedidos; um pedido de "
+                            "1 ficheiro = 1 ficheiro com tudo lá dentro. Zero extras não "
+                            "pedidos (README, relatórios, results.txt, pastas novas).\n"
+                            "5. VALIDA antes de terminar — compila/executa o que criaste e "
+                            "corrige; nunca termines com código por testar.\n"
+                            "6. SE FALHAR, PENSA e ajusta — analisa o erro e muda de "
+                            "abordagem; NUNCA repitas a mesma chamada à espera que passe.\n"
+                            "7. SÊ HONESTO no final — diz o que foi feito, o que funciona e "
+                            "o que ficou por fazer; não pintes algo como concluído se não "
+                            "estiver.\n"
+                            "\nRegras obrigatórias:\n"
                             "- PRIMEIRO o contexto, DEPOIS o código: antes da primeira "
                             "write_file, faz list_dir na pasta de trabalho e lê os "
                             "ficheiros de dados existentes (só as primeiras linhas / "
                             "cabeçalhos) para programares com base nas colunas REAIS — "
                             "não inventes estruturas.\n"
                             "- Escreve um plano curto antes de codar: linguagem pedida, "
-                            "ficheiros a criar, itens do enunciado a satisfazer.\n"
+                            "lista EXATA dos ficheiros a criar (SÓ os que o pedido pede) e "
+                            "itens do enunciado a satisfazer.\n"
                             "- SEGUE O ENUNCIADO ITEM A ITEM e usa SÓ a linguagem/tecnologia "
                             "que ele pede. Proibido misturar: NÃO coloques HTML/CSS/JS nem "
                             "Java dentro de ficheiros .py; se o enunciado pedir HTML, cria "
@@ -873,8 +897,13 @@ class Handler(BaseHTTPRequestHandler):
                             "install, winget, downloads). Usa só o Python do projeto: \""
                             + py
                             + "\" e as bibliotecas já instaladas.\n"
-                            "- Implementa AGORA o exercício completo na pasta de trabalho atual "
-                            "(cria todos os ficheiros pedidos: código, CSV, HTML, etc.).\n"
+                            "- Faz EXATAMENTE o que o pedido pede — nem mais nem menos. "
+                            "Cria SÓ os ficheiros explicitamente pedidos: o utilizador pediu "
+                            "UM ficheiro? Então é UM, com tudo lá dentro. Proibido criar "
+                            "extras não pedidos — NADA de README, relatórios, results.txt, "
+                            "logs, ficheiros auxiliares ou pastas novas que ninguém pediu.\n"
+                            "- Antes de cada write_file pergunta: \"o utilizador pediu este "
+                            "ficheiro?\" — se a resposta não for claramente sim, não o crias.\n"
                             "- Cada ficheiro numa write_file separada, com NO MÁXIMO ~250 "
                             "linhas por chamada. Se o ficheiro pedido for maior, cria "
                             "primeiro a estrutura + as primeiras funções/opções e acrescenta "
