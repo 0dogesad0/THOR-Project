@@ -25,6 +25,32 @@ _BACKGROUND_PROCS: list[dict[str, Any]] = []
 
 _DEFAULT_IGNORE = {".git", "node_modules", "__pycache__", ".venv", "venv", ".thor", ".idea", ".vscode", "dist", "build", ".next", "target", ".cache"}
 
+# --- mesmo ambiente de ferramentas em todo o lado --------------------------
+# O Python do projeto (runtime/) passa a ser o PRIMEIRO do PATH do processo:
+# todos os shells que o Thor lanca (run_command, CLI, ponte OpenCode) herdam
+# isto, por isso "python" e sempre o do projeto (com pandas/matplotlib) e
+# nunca o atalho da Microsoft Store. O shim py_compile.cmd (gerado aqui, pois
+# runtime/ nao vai para o git) faz de "py_compile f.py" um comando real — o
+# modulo py_compile existe em qualquer Python, so faltava o comando no shell.
+_RT_DIR = Path(__file__).resolve().parent / "runtime"
+if _RT_DIR.is_dir():
+    os.environ["PATH"] = str(_RT_DIR) + os.pathsep + os.environ.get("PATH", "")
+    _SHIM = _RT_DIR / "py_compile.cmd"
+    _SHIM_BYTES = (
+        b"@echo off\r\n"
+        b"rem Thor: valida sintaxe .py (gerado no arranque do Thor)\r\n"
+        b'"%~dp0python.exe" -m py_compile %*\r\n'
+    )
+    try:
+        _cur = _SHIM.read_bytes()
+    except OSError:
+        _cur = None
+    if _cur != _SHIM_BYTES:
+        try:
+            _SHIM.write_bytes(_SHIM_BYTES)
+        except OSError:
+            pass
+
 
 def set_confirm_mode(on: bool) -> str:
     global CONFIRM_MODE
