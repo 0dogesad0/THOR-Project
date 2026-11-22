@@ -195,14 +195,14 @@ Suporte por fabricante de GPU:
 | NVIDIA (ex.: RTX 4060) | CUDA (`runtime-gpu/`) | driver NVIDIA recente — sem instalar o CUDA Toolkit |
 | AMD (ex.: RX 6000/7000, Radeon 780M) | Vulkan (`runtime-vulkan/`) | driver AMD atualizado |
 | Intel (ex.: Arc, Iris Xe) | Vulkan (`runtime-vulkan/`) | driver Intel atualizado |
-| Sem GPU / tudo falhar | CPU (`runtime/`) | apenas ~8 GB de RAM |
+| Sem GPU / tudo falhar | CPU (`runtime/`) | ~11 GB de RAM |
 
 Detalhes:
 
 - A escolha fica guardada em `.thor/backend` e vale para os proximos arranques.
 - Mudar de motor reinicia o modelo (~10 s GPU, ~40 s CPU); **nao** desliga o chat.
 - O chat pergunta ao Windows (`nvidia-smi` / WMI) que GPUs existem e escolhe o melhor backend automaticamente.
-- O modelo usa ~5 GB (+0.75 GB do projetor de visão) — cabe por completo em GPUs de 8 GB+ VRAM (`-ngl 99`). Com menos VRAM, o arranque GPU falha e o chat cai para CPU sozinho.
+- O modelo usa ~5.5 GB (+0.75 GB do projetor de visão) e o contexto de 65536 tokens custa ~5 GB em KV cache (q8_0) — cabe em GPUs de 12 GB+ VRAM (`-ngl 99`). Com menos VRAM, o arranque GPU falha e o chat cai para CPU sozinho.
 - O chat mostra no estado o backend efectivo: `GPU·CUDA`, `GPU·VULKAN` ou `CPU`.
 - Se o llama-server morrer, o chat **reinicia-o sozinho** no modo escolhido.
 - Podes apagar `runtime-gpu/` ou `runtime-vulkan/` que nao usems — o Auto salta para a proxima opcao.
@@ -362,10 +362,10 @@ Ficheiros gerados durante o uso (podes apagar quando quiseres):
 ## Requisitos de máquina
 
 - Windows 10/11 x64 (ou superior)
-- ~8 GB de RAM livres (o modelo usa ~6 GB em CPU; na GPU fica na VRAM)
+- ~11 GB de RAM livres (o modelo usa ~11 GB em CPU com o contexto completo; na GPU fica na VRAM)
 - ~8 GB de disco livres (runtimes + modelo + projetor de visão)
 - **Não** precisa de: internet (a não ser para os downloads de instalação — código, runtimes, modelo e o `setup_python.bat`), Python instalado, Visual C++, contas ou chaves de API
-- **Opcional**: GPU — NVIDIA (CUDA), AMD/Intel (Vulkan) com 8 GB+ VRAM e driver atual — aí corre ~10x mais rapido
+- **Opcional**: GPU — NVIDIA (CUDA), AMD/Intel (Vulkan) com 12 GB+ VRAM e driver atual — aí corre ~10x mais rapido
 
 ---
 

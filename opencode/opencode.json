@@ -23,7 +23,7 @@
           "name": "Qwen3-VL-8B-Instruct (local)",
           "modelID": "model",
           "capabilities": { "tools": true },
-          "limit": { "context": 24576, "output": 8192 }
+          "limit": { "context": 49152, "output": 8192 }
         }
       }
     }
