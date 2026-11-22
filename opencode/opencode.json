@@ -20,7 +20,7 @@
       },
       "models": {
         "model": {
-          "name": "Qwen3-VL-8B-Instruct (local)",
+          "name": "MiMo-V2.6-Distill-Qwen-9B (local)",
           "modelID": "model",
           "capabilities": { "tools": true },
           "limit": { "context": 49152, "output": 8192 }

@@ -243,7 +243,7 @@ def _try_spawn(kind: str, wait: int = 90) -> subprocess.Popen | None:
     # visão: o projetor multimodal (mmproj) é o que dá aos olhos do modelo.
     # sem ele o llama-server arranca na mesma mas ignora as imagens.
     mmproj = BASE_DIR / "model" / "mmproj.gguf"
-    # Qwen3-VL: fotos de telemovel a resolucao nativa gastam 7k–8k tokens
+    # VISAO: fotos de telemovel a resolucao nativa gastam 7k–8k tokens
     # cada uma; sem teto, 2+ imagens estouram o contexto (HTTP 400). O teto
     # por imagem faz o mtmd reduzir a grelha — 4 imagens cabem (~1280*4 + texto).
     # -c 65536 (nao 24576): os pedidos reais chegam a 30-37k tokens (enunciado

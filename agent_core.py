@@ -35,18 +35,17 @@ class StopRequested(Exception):
 def load_model_name() -> str:
     """Nome do modelo a servir.
 
-    Ha varios .gguf na pasta model/: model.gguf (o principal), mmproj.gguf
-    (projetor de visao — NAO e um modelo de linguagem) e textonly.gguf
-    (modelo antigo so-texto). Sem a preferencia explicita, a ordenacao
-    alfabetica escolhia "mmproj" e o llama-server tentava carregar o
-    projetor como se fosse o modelo.
+    Ha 2 .gguf na pasta model/: model.gguf (o MiMo — modelo de linguagem) e
+    mmproj.gguf (projetor de visao — NAO e um modelo de linguagem). Sem a
+    preferencia explicita, a ordenacao alfabetica escolhia "mmproj" e o
+    llama-server tentava carregar o projetor como se fosse o modelo.
     """
     here = Path(__file__).resolve().parent
     mdir = here / "model"
     main = mdir / "model.gguf"
     if main.exists():
         return main.stem
-    skip = ("mmproj", "textonly")
+    skip = ("mmproj",)
     candidates = [p for p in mdir.glob("*.gguf")
                   if not p.stem.lower().startswith(skip)]
     if not candidates:
@@ -157,7 +156,7 @@ def content_of(m: dict[str, Any]) -> Any:
 
     Texto puro -> str. Se a mensagem tiver imagens anexadas (m["images"]),
     devolve uma lista de partes [texto, image_url, image_url...] para o
-    modelo local ver os pixels (Qwen3-VL + mmproj no llama-server).
+    modelo local ver os pixels (modelo VL + mmproj no llama-server).
     """
     text = m.get("content") or ""
     imgs = m.get("images") or []
@@ -521,7 +520,7 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
     """Executa um turno do agente e produz eventos:
     info | delta (texto em tempo real) | tool_start | tool_result | stopped | error.
 
-    `images` = anexos em base64 que o modelo passa a VER (Qwen3-VL)."""
+    `images` = anexos em base64 que o modelo passa a VER (via mmproj)."""
     STOP_EVENT.clear()
     messages.append(prepare_user_message(user_text, images))
     had_tools = False

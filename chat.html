@@ -20,7 +20,6 @@
     padding: 10px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
   }
   .brand { font-weight: 700; color: var(--accent); white-space: nowrap; }
-  .brand small { color: var(--muted); font-weight: 400; }
   #cwdForm { display: flex; gap: 6px; flex: 1; min-width: 260px; }
   #cwdInput {
     flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
@@ -192,7 +191,7 @@
 <body>
 
 <header>
-  <div class="brand">Thor Agent <small id="modelName"></small> <small id="agentBadge" title="Parceria local: o Thor recebe e distribui, o OpenCode executa — sem internet"></small></div>
+  <div class="brand">THOR</div>
   <form id="cwdForm">
     <input id="cwdInput" placeholder="Caminho da pasta de trabalho…" spellcheck="false">
     <button type="button" onclick="pickFolder()" title="Abrir o seletor de pastas do Windows">📂 Escolher…</button>
@@ -262,7 +261,6 @@ async function refreshInfo() {
   try {
     const r = await fetch('/api/info');
     const d = await r.json();
-    $('modelName').textContent = '· ' + d.model;
     $('cwdInput').value = d.cwd;
     $('cwdEcho').textContent = '📁 ' + d.cwd;
     $('statusDot').classList.toggle('on', d.llama);
@@ -274,10 +272,6 @@ async function refreshInfo() {
     $('statusTxt').textContent = txt;
     $('statusTxt').title = (d.gpu ? 'GPU: ' + d.gpu + ' — ' : '') + 'modo: ' + d.mode + (d.api ? ' (' + d.api + ')' : '');
     if (document.activeElement !== $('backendSel')) $('backendSel').value = d.mode;
-    const bits = ['· Thor'];
-    if (d.opencode) bits.push('+ OpenCode');
-    if (d.vision) bits.push('· 👁 vê imagens');
-    $('agentBadge').textContent = bits.join(' ');
   } catch { $('statusTxt').textContent = 'servidor em baixo'; }
 }
 let switching = false;

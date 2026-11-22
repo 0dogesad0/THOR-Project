@@ -1,6 +1,6 @@
-# Thor Agent
+# THOR
 
-Chat AI de coding **100% offline e portátil** para Windows — estilo opencode/Cursor. Sem internet, sem instalações, sem contas. **Vê imagens** e trabalha em **parceria Thor + OpenCode**.
+Chat AI de coding **100% offline e portátil** para Windows — com **MiMo Qwen** local (`MiMo-V2.6-Distill-Qwen-9B`). Sem internet, sem instalações, sem contas. **Vê imagens**, faz **tool calling** e trabalha em **parceria Thor + OpenCode**.
 
 > **A chegar do GitHub?** Este repo contém só o código (~50 KB). Para funcionar faltam 2 coisas: os **runtimes** (release v1.0) e o **modelo IA** — as instruções completas estão em [Instalação do zero](#instalação-do-zero-vindo-do-github).
 
@@ -13,7 +13,7 @@ Tudo o que falta para o Thor ficar a funcionar — são **2 downloads** além do
 ### 1. Descarregar o código
 
 - Na página do repo: botão verde **Code → Download ZIP**, ou `git clone <url-do-repo>`
-- Extrai/entra na pasta do projeto
+- Extrai/entra na pasta do projeto (`THOR-Project`)
 
 ### 2. Descarregar os runtimes (release v1.0)
 
@@ -34,15 +34,16 @@ e `runtime-vulkan/` ao lado, se as quiseres).
 - **Com GPU**: extrai também os outros dois — o chat escolhe sozinho (CUDA → Vulkan → CPU).
 - Sem Python nenhum instalado? O `runtime` traz o Python portátil; se o teu zip não o incluir, instala [Python 3.12+](https://www.python.org/downloads/) que o `start.bat` também o deteta. Depois corre `setup_python.bat` (passo 4) para o pandas/matplotlib.
 
-### 3. Descarregar o modelo IA (~5.8 GB) — com visão
+### 3. Descarregar o modelo MiMo Qwen (~6.8 GB) — com visão
 
 O modelo não cabe no git nem na release. Duplo-clique em **`install_model.bat`**
-(faz os 2 downloads de uma vez e retoma se cair) — ou descarrega à mão:
+(faz os 2 downloads de uma vez, **para dentro da pasta `model/` do projeto**, e
+retoma se cair) — ou descarrega à mão:
 
 | Ficheiro | URL | Onde pôr |
 |---|---|---|
-| `Qwen3VL-8B-Instruct-Q4_K_M.gguf` (5.03 GB) | `https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/Qwen3VL-8B-Instruct-Q4_K_M.gguf` | `model/model.gguf` |
-| `mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf` (0.75 GB) | `https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf` | `model/mmproj.gguf` |
+| `MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf` (5.84 GB) | `https://huggingface.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF/resolve/main/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf` | `model/model.gguf` |
+| `mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf` (0.92 GB) | `https://huggingface.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF/resolve/main/mmproj-MiMo-V2.6-Distill-Qwen-9B-f16.gguf` | `model/mmproj.gguf` |
 
 - É uma só vez: **sem internet depois disto**
 - O `mmproj` é o **projetor de visão** — sem ele o chat funciona mas não vê imagens
@@ -66,11 +67,23 @@ Duplo-clique em **`start.bat`** — o chat abre sozinho no navegador (`http://12
 
 Se algo falhar: `start.bat` diz em falta qual dos 3 (modelo, runtime, python).
 
+### 6. (Opcional) Instalar o motor OpenCode
+
+Precisa de internet **so uma vez** (~420 MB); depois corre 100% local:
+
+```
+opencode\install.bat
+```
+
+Instala o `bun.exe` portatil e os pacotes `@opencode/sdk` + `@opencode/ai`.
+Sem isto o Thor funciona na mesma — só fica sem a parceria (ver secção
+[Motor de agente](#motor-de-agente-thor--opencode-parceria)).
+
 ---
 
 ## Como usar
 
-1. Copia a pasta `thor-portable` para o destino (ex.: `C:\Users\<user>\Desktop\thor-portable`).
+1. Copia a pasta `THOR-Project` para o destino (ex.: `C:\Users\<user>\Desktop\THOR-Project`).
 2. Duplo-clique em **`start.bat`**.
 3. Espera o modelo carregar (10–30 s) — abre-se sozinho o chat no navegador (`http://127.0.0.1:8090/`).
 4. Define a pasta de trabalho no topo do chat, escreve o pedido e pressiona Enter.
@@ -88,18 +101,20 @@ pelo modelo**; binarios ficam em `.thor/uploads/` e o agente opera-os por caminh
 
 | Componente | Detalhe |
 |---|---|
-| **Modelo IA** | `Qwen3-VL-8B-Instruct` (Q4_K_M, GGUF, 5.03 GB) + `mmproj` (0.75 GB) — **vê imagens**, tool calling e código |
+| **Modelo IA** | **MiMo Qwen** — `MiMo-V2.6-Distill-Qwen-9B` (Q4_K_M, GGUF, 5.84 GB) + `mmproj` (0.92 GB) — **vê imagens**, tool calling e código |
 | **Runtime LLM** | llama.cpp `b11753`: **CUDA** (`runtime-gpu/`) + **Vulkan** (`runtime-vulkan/`) + **CPU** (`runtime/`) — o chat escolhe o melhor automaticamente (da release v1.0) |
 | **Motor de agente** | **Thor + OpenCode** em parceria (ver secção própria) — `opencode/` com o SDK embebido, 100% local |
 | **Python** | Python 3.12.10 portátil (sem instalar) + `pandas` / `matplotlib` / `numpy` já instalados para os exercícios correrem offline |
 | **Interface** | Chat web no navegador (start.bat) + modo terminal CLI (start_cli.bat) — Python stdlib apenas |
 | **Portas locais** | `8080` = llama-server (modelo), `8090` = chat web — so acessiveis na tua maquina |
-| **Tamanho total** | ~7 GB (modelo + runtimes CPU+GPU + scripts) |
+| **Tamanho total** | ~8 GB (modelo + runtimes CPU+GPU + scripts) |
 | **Dependências externas** | Nenhuma em runtime — funciona sem internet e sem software pré-instalado |
 
-O Qwen3-VL suporta **tool calling nativo** (function calling) e **visão**: o
-agente decide quando ler, escrever, editar ou executar comandos — e também
-quando *olhar* para uma imagem que lhe envias.
+O **MiMo Qwen** (`MiMo-V2.6-Distill-Qwen-9B`) é o modelo agentic da Xiaomi MiMo —
+um fine-tune SFT do **Qwen3.5-9B** com dados gerados pelo MiMo — otimizado para
+código, tarefas de agente e visão. Suporta **tool calling nativo**
+(function calling) e **visão**: o agente decide quando ler, escrever, editar ou
+executar comandos — e também quando *olhar* para uma imagem que lhe envias.
 
 ---
 
@@ -139,19 +154,13 @@ tu escreves o pedido
 - Tudo passa pelos **mesmos eventos SSE de sempre** (`start`, `delta`,
   `tool_start`, `tool_result`, `info`, `error`, `stopped`, `done`) — o ⏹ Parar,
   os separadores e o historico continuam a funcionar igual.
-- Se o OpenCode nao estiver instalado, o badge do topo mostra so `· Thor` e a
-  parceria fica desligada sem quebrar nada.
+- Se o OpenCode nao estiver instalado, a parceria fica desligada sem quebrar
+  nada.
 
-### Instalar o motor OpenCode (opcional, 1 vez)
+### Instalar o motor OpenCode
 
-Precisa de internet **so uma vez** (~420 MB); depois corre 100% local:
-
-```
-opencode\install.bat
-```
-
-Instala o `bun.exe` portatil e os pacotes `@opencode/sdk` + `@opencode/ai`.
-(Para o pandas/matplotlib dos exercícios, usa o `setup_python.bat` do passo 4.)
+Ver **passo 6** da [Instalação do zero](#instalação-do-zero-vindo-do-github)
+(`opencode\install.bat`, ~420 MB uma só vez).
 
 ### Como se garante que e offline
 
@@ -202,7 +211,7 @@ Detalhes:
 - A escolha fica guardada em `.thor/backend` e vale para os proximos arranques.
 - Mudar de motor reinicia o modelo (~10 s GPU, ~40 s CPU); **nao** desliga o chat.
 - O chat pergunta ao Windows (`nvidia-smi` / WMI) que GPUs existem e escolhe o melhor backend automaticamente.
-- O modelo usa ~5.5 GB (+0.75 GB do projetor de visão) e o contexto de 65536 tokens custa ~5 GB em KV cache (q8_0) — cabe em GPUs de 12 GB+ VRAM (`-ngl 99`). Com menos VRAM, o arranque GPU falha e o chat cai para CPU sozinho.
+- O modelo usa ~5.9 GB (+0.92 GB do projetor de visão) e o contexto de 65536 tokens custa ~5 GB em KV cache (q8_0) — cabe em GPUs de 12 GB+ VRAM (`-ngl 99`). Com menos VRAM, o arranque GPU falha e o chat cai para CPU sozinho.
 - O chat mostra no estado o backend efectivo: `GPU·CUDA`, `GPU·VULKAN` ou `CPU`.
 - Se o llama-server morrer, o chat **reinicia-o sozinho** no modo escolhido.
 - Podes apagar `runtime-gpu/` ou `runtime-vulkan/` que nao usems — o Auto salta para a proxima opcao.
@@ -317,10 +326,10 @@ Abrido pelo `start.bat` em `http://127.0.0.1:8090/`:
 ## Estrutura da pasta
 
 ```
-thor-portable/
+THOR-Project/
 ├── start.bat            ← entrada: chat web (abre no navegador; o modelo e gerido pelo server.py)
 ├── start_cli.bat        ← modo terminal (CLI)
-├── install_model.bat    ← 1x: descarrega o modelo Qwen3-VL + projetor de visao (~5.8 GB)
+├── install_model.bat    ← 1x: descarrega o modelo MiMo Qwen + projetor de visao (~6.8 GB) para model/
 ├── setup_python.bat     ← 1x (com internet): Python completo + pandas/matplotlib no runtime
 ├── agent_core.py        ← nucleo do agente (streaming, tool calling, visao, parceria)
 ├── agent.py             ← loop do chat em terminal (usa agent_core)
@@ -329,9 +338,8 @@ thor-portable/
 ├── tools.py             ← todas as ferramentas (ficheiros, terminal, web, undo…)
 ├── opencode_bridge.py   ← ponte Python <-> host OpenCode (spawna, relays, traduz eventos)
 ├── model/
-│   ├── model.gguf       ← Qwen3-VL-8B-Instruct Q4_K_M (5.03 GB) — codigo + visao
-│   ├── mmproj.gguf      ← projetor de visao (0.75 GB) — sem ele nao ha imagens
-│   └── textonly.gguf    ← (opcional) modelo antigo so-texto, backup
+│   ├── model.gguf       ← MiMo-V2.6-Distill-Qwen-9B Q4_K_M (5.84 GB) — codigo + visao
+│   └── mmproj.gguf      ← projetor de visao (0.92 GB) — sem ele nao ha imagens
 ├── opencode/            ← motor OpenCode embebido (opencode/install.bat 1x)
 │   ├── install.bat      ← instala bun + @opencode/sdk + @opencode/ai
 │   ├── host.ts          ← host embebido: stdio + guarda offline + protecao de dados
@@ -372,13 +380,13 @@ Ficheiros gerados durante o uso (podes apagar quando quiseres):
 ## Trocar o modelo
 
 1. Descarrega outro `.gguf` **com visão** (tem de vir com o ficheiro `mmproj-*.gguf`)
-   — ex.: `Qwen3-VL-4B-Instruct`, `Qwen3-VL-8B-Instruct`, `Qwen2.5-VL-7B-Instruct`.
+   — ex.: outro quantizado do `MiMo-V2.6-Distill-Qwen-9B` (Q5_K_M, Q6_K, …).
 2. Coloca o modelo em `model/model.gguf` e o projetor em `model/mmproj.gguf`.
 3. Corre `start.bat` — o agente deteta-os automaticamente.
 
 So texto (sem visão): podes pôr qualquer `.gguf` com tool calling em
 `model/model.gguf` e **apagar** `model/mmproj.gguf` — o chat arranca na mesma,
-so nao ve imagens (o badge deixa de dizer `👁 vê imagens`).
+so nao ve imagens.
 
 Modelos maiores = respostas melhores, mas mais lentos em CPU/GPU.
 
@@ -390,5 +398,5 @@ Modelos maiores = respostas melhores, mas mais lentos em CPU/GPU.
 - **OpenCode (`@opencode/sdk`, `@opencode/ai`)**: distribuído pelo seu próprio licenciamento (vendored em `opencode/node_modules/`, não vai para o git)
 - **llama.cpp**: MIT (incluido nos runtimes)
 - **OpenMP (LLVM)**: Apache-2.0
-- **Qwen3-VL**: Apache-2.0 (model weights — redistribuir com essa licenca)
+- **MiMo-V2.6 / Qwen3.5** (model weights — MIT/Apache-2.0, redistribuir com essa licenca)
 - **Python**: PSF License
