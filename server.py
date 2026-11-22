@@ -225,13 +225,15 @@ def _try_spawn(kind: str, wait: int = 90) -> subprocess.Popen | None:
     # do modelo deixa de ficar residente em RAM (~5 GB a menos).
     if kind == "cuda":
         exe = BASE_DIR / "runtime-gpu" / "llama-server.exe"
-        extra = ["-ngl", "99", "-t", "8", "-np", "1", "-cram", "3072", "-lm", "none"]
+        extra = ["-ngl", "99", "-t", "8", "-np", "1", "-cram", "3072", "-lm", "none",
+                 "-ctk", "q8_0", "-ctv", "q8_0"]
     elif kind == "vulkan":
         exe = BASE_DIR / "runtime-vulkan" / "llama-server.exe"
-        extra = ["-ngl", "99", "-t", "8", "-np", "1", "-cram", "3072", "-lm", "none"]
+        extra = ["-ngl", "99", "-t", "8", "-np", "1", "-cram", "3072", "-lm", "none",
+                 "-ctk", "q8_0", "-ctv", "q8_0"]
     else:
         exe = BASE_DIR / "runtime" / "llama-server.exe"
-        extra = ["-t", "16", "-np", "1", "-cram", "3072"]
+        extra = ["-t", "16", "-np", "1", "-cram", "3072", "-ctk", "q8_0", "-ctv", "q8_0"]
     # -np 1: UMA slot activa — o OpenCode faz chamadas paralelas ao modelo
     # (prompt principal + auxiliar tipo título) e com slots múltiplas a GPU
     # esmagava-se (prompt eval de 197s, geração a 0.04 t/s). Com 1 slot
@@ -244,12 +246,18 @@ def _try_spawn(kind: str, wait: int = 90) -> subprocess.Popen | None:
     # Qwen3-VL: fotos de telemovel a resolucao nativa gastam 7k–8k tokens
     # cada uma; sem teto, 2+ imagens estouram o contexto (HTTP 400). O teto
     # por imagem faz o mtmd reduzir a grelha — 4 imagens cabem (~1280*4 + texto).
-    # -c 24576 (nao 8192): exercicios reais (ex.: SteamPulse, 17 opcoes) dao
-    # ficheiros de 10k+ tokens — em 8192 a compactacao do OpenCode era cortada
-    # a meio ("Compaction summary reached the output token limit") e as escritas
-    # grandes estouravam o limite de saida. Precisa de espaco para o enunciado
-    # transcrito + ficheiro grande + resumo de compactacao. ESPERA ~3.6 GB de
-    # KV cache (mais ~5 GB de pesos) — corre em maquinas com 16 GB de RAM.
+    # -c 65536 (nao 24576): os pedidos reais chegam a 30-37k tokens (enunciado
+    # transcrito + grelha + CSVs + tool schemas). Em 24576 o llama REJEITAVA-os
+    # ("exceeds the available context size") e o OpenCode compactava a reacao:
+    # resumia o enunciado detalhado e o agente improvisava uma saida generica.
+    # 65536 cobre o pico (~37k) com folga para o erro de estimativa do OpenCode
+    # (chars/4 subestima os tokens reais em >1.4x) — por isso o limit.context
+    # do opencode.json (49152) fica ABAIXO de 65536: a compactacao proativa
+    # dispara antes de o llama rejeitar. KV q8_0 (-ctk/-ctv): com 65536 o KV
+    # fp16 passa de ~10.5 GB — em 24 GB de VRAM so sobravam ~500 MiB e o
+    # arranque podia falhar; q8_0 corta o KV para metade com perda
+    # desprezivel. ESPERA ~5.2 GB de KV + ~5,5 GB de pesos (GPU com 12 GB+,
+    # ou fallback CPU com ~11 GB de RAM).
     vision_args: list[str] = []
     if mmproj.exists():
         vision_args = [
@@ -265,7 +273,7 @@ def _try_spawn(kind: str, wait: int = 90) -> subprocess.Popen | None:
         logf.flush()
         proc = subprocess.Popen(
             [str(exe), "-m", str(model), "--port", "8080", "--host", "127.0.0.1",
-             "-c", "24576", "--no-warmup", *vision_args, *extra],
+             "-c", "65536", "--no-warmup", *vision_args, *extra],
             cwd=str(BASE_DIR),
             stdout=logf, stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW,
@@ -693,7 +701,7 @@ class Handler(BaseHTTPRequestHandler):
                     "mime": str(a.get("mime") or "image/png"),
                     "data": str(a["data"]),
                 })
-        images = images[:8]  # 8 imagens max por pedido (contexto do modelo = 24576)
+        images = images[:8]  # 8 imagens max por pedido (cada uma ate 1280 tokens + texto)
 
         sid, sess = get_session(str(body.get("session_id", "")))
         title = set_title_if_needed(sess, message)
