@@ -835,8 +835,47 @@ class Handler(BaseHTTPRequestHandler):
 
             # ---------- fase 2a: o Thor trata o pedido diretamente ----------
             if dec.get("action") != "delegate":
+                # IMAGENS PRIMEIRO: no caminho direto os pixels iam colados na
+                # mensagem e o modelo IGNORAVA-os (ia direto aos CSVs sem nunca
+                # ler o enunciado). Mesma solucao da fase 2b: le primeiro com a
+                # visao e passa o TEXTO ao modelo — os pixels ficam em reserva
+                # (view_image recarrega-os do disco quando precisar).
+                direct_msg = message
+                if images and (attached_images or core._needs_file_action(message, False)):
+                    emit({
+                        "type": "info",
+                        "content": f"Thor: {len(images)} imagem(ns) — a ler o enunciado (visão)…",
+                    })
+                    vt = ""
+                    try:
+                        vt = core.vision_transcribe(images)
+                    except core.StopRequested:
+                        emit({"type": "stopped", "content": "⏹ interrompido pelo utilizador."})
+                        emit({"type": "done"})
+                        return
+                    except Exception:
+                        vt = ""
+                    if vt:
+                        emit({
+                            "type": "info",
+                            "content": f"Thor: enunciado transcrito ({len(vt)} chars) → a analisar.",
+                        })
+                        direct_msg = (
+                            message
+                            + "\n\nConteúdo lido das imagens (transcrito pela visão do "
+                            "Thor — este TEXTO é o enunciado; se precisares de rever "
+                            "um detalhe visual, view_image com o nome da imagem "
+                            "recarrega os pixels):\n" + vt
+                        )
+                        images = []  # o texto ja la chega; poupa ~1k tokens/imagem por turno
+                    else:
+                        direct_msg = message + (
+                            "\n\n[Imagens nesta conversa/pasta que ainda NAO leste: "
+                            "ANTES de qualquer analise chama view_image com o nome de "
+                            "cada imagem, le o enunciado escrito la e so depois trabalha.]"
+                        )
                 n_delta = 0
-                for ev in core.run_turn_events(sess["messages"], message, images=images):
+                for ev in core.run_turn_events(sess["messages"], direct_msg, images=images):
                     et = ev.get("type")
                     if et == "tool_start":
                         print(f"[{time.strftime('%H:%M:%S')}]   tool: {ev.get('name')} {str(ev.get('args', ''))[:80]}", flush=True)

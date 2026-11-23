@@ -709,6 +709,32 @@ def _needs_file_action(user_text: str, has_images: bool = False) -> bool:
     return True
 
 
+def _looks_like_error(result: str) -> bool:
+    """True se o resultado de uma ferramenta e um ERRO (nao uma saida normal).
+
+    Usado pelo anti-loop de resultados: so repeticoes de ERRO contam — uma
+    leitura repetida com sucesso e uso normal das ferramentas."""
+    r = result or ""
+    return (
+        r.startswith("[erro]")
+        or "exit_code: 1" in r
+        or "Traceback (most recent call last)" in r
+        or "[LOOP DETETADO]" in r
+    )
+
+
+def _error_hint(result: str) -> str:
+    """Linha-chave de um traceback (ex.: \"KeyError: 'Mes'\") para o aviso de
+    loop trazer a CAUSA concreta em vez de so 'nao repitas'."""
+    m = re.findall(r"^[\w.]*(?:Error|Exception|Interrupted):.*$", result or "", re.M)
+    if m:
+        return m[-1].strip()[:200]
+    for ln in reversed((result or "").splitlines()):
+        if ln.strip():
+            return ln.strip()[:200]
+    return ""
+
+
 def run_turn_events(messages: list[dict[str, Any]], user_text: str,
                     images: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
     """Executa um turno do agente e produz eventos:
@@ -718,10 +744,18 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
     STOP_EVENT.clear()
     messages.append(prepare_user_message(user_text, images))
     had_tools = False
-    # guarda anti-loop: assinatura (nome+args) da ultima chamada e quantas
-    # vezes seguidas o modelo repetiu EXATAMENTE a mesma chamada.
+    # guarda anti-loop:
+    #  - last_sig/same_count : a MESMA chamada 2x seguidas (loop direto);
+    #  - sig_history         : a MESMA chamada a repetir no meio de OUTRAS
+    #    (padrao alternado write_file <-> run_command que passava ao lado do
+    #    detector de "2x seguidas" e gastava os 40 turnos todos iguais);
+    #  - block_count         : quantas vezes ja foi bloqueada uma repeticao;
+    #    na 4a o turno fecha em vez de so avisar.
     last_sig: str | None = None
     same_count = 0
+    sig_history: list[str] = []
+    res_history: list[str] = []
+    block_count = 0
     try:
         for _turn in range(MAX_ITERATIONS):
             if STOP_EVENT.is_set():
@@ -779,21 +813,23 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
                     else json.dumps(args, ensure_ascii=False)
                 )
                 sig = name + " " + preview
+                sig_history.append(sig)
                 if sig == last_sig:
                     same_count += 1
                 else:
                     last_sig, same_count = sig, 0
-                # 3x a MESMA chamada seguida = loop: nao executa mais, devolve
-                # instrucao clara para mudar de abordagem. Se o modelo ignorar
-                # e repetir mais 2x, fecha o turno — 40 iteracoes gastadas a
-                # ver o mesmo resultado nao sao trabalho, sao um loop.
-                if same_count >= 2:
+                # 3a vez da MESMA chamada — seja 2x seguidas, seja a repetir no
+                # meio de outras (padrao alternado A,B,A,B que o detector antigo
+                # nao apanhava). Nao executa: o resultado ja e conhecido.
+                repeats = sig_history[-6:].count(sig)  # inclui a atual
+                if repeats >= 3:
+                    block_count += 1
                     yield {"type": "tool_start", "name": name, "args": preview}
-                    if same_count >= 4:
+                    if block_count >= 4 or repeats >= 5:
                         result = (
-                            "[LOOP DETETADO — TURNO ENCERRADO] Chamas a mesma "
-                            f"{name} com os mesmos argumentos 5 vezes seguidas. "
-                            "O resultado e sempre identico, por isso paro aqui. "
+                            "[LOOP DETETADO — TURNO ENCERRADO] Esta chamada ja "
+                            f"apareceu {repeats} vezes (bloqueio n.º {block_count}) "
+                            "e o resultado e sempre identico, por isso paro aqui. "
                             "Na resposta final, diz ao utilizador o que conseguiste "
                             "fazer e o que ficou por fazer."
                         )
@@ -807,19 +843,22 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
                         yield {
                             "type": "info",
                             "content": (
-                                "o modelo repetiu a mesma chamada 5x — a parar o "
+                                "o modelo repetiu a mesma chamada 4x — a parar o "
                                 "turno para nao gastar iteracoes."
                             ),
                         }
                         return
+                    onde = ("3x seguidas" if same_count >= 2
+                            else f"ja e a {repeats}a vez nos últimos {len(sig_history[-6:])} chamadas, "
+                                 "mesmo alternando com outras")
                     result = (
-                        "[LOOP DETETADO] Esta e a "
-                        f"{same_count + 1}a vez seguida que chamas {name} com "
-                        "EXATAMENTE os mesmos argumentos — o resultado sera "
-                        "sempre identico, por isso NAO repitas a chamada. "
-                        "Corrige os argumentos (caminho, content/old_string, "
-                        "tipos), usa outra ferramenta, ou se ja tens informacao "
-                        "suficiente responde ao utilizador."
+                        "[LOOP DETETADO] Esta chamada repete-se: "
+                        f"{onde} — o resultado sera SEMPRE identico, por isso "
+                        "NAO a repitas. Muda a CAUSA do problema: se uma "
+                        "execucao falhou, le o erro/traceback e corrige o CODIGO "
+                        "(coluna, separador, caminho) antes de voltar a correr; "
+                        "se uma escrita falhou, corrige os argumentos. Se ja tens "
+                        "informacao suficiente, responde ao utilizador."
                     )
                     yield {"type": "tool_result", "name": name, "result": result}
                     messages.append({
@@ -857,13 +896,56 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
                         )
                 else:
                     result = execute_tool(name, args)
-                yield {"type": "tool_result", "name": name, "result": result}
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": name,
-                    "content": result,
-                })
+                # MESMO resultado de ERRO3x seguidas, mesmo com argumentos
+                # diferentes: o modelo esta a voltar ao mesmo sem corrigir a
+                # causa (ex.: sempre o mesmo KeyError). So entao e que este
+                # ramo conta — escritas/leituras com sucesso nao sao loop.
+                repeated_error = (
+                    _looks_like_error(result)
+                    and len(res_history) >= 2
+                    and res_history[-2:] == [result, result]
+                )
+                res_history.append(result)
+                if repeated_error:
+                    block_count += 1
+                    hint = _error_hint(result)
+                    loop_msg = (
+                        "[LOOP DETETADO] O resultado desta chamada e EXATAMENTE "
+                        "igual aos 2 anteriores — o mesmo erro outra vez"
+                        + (f" (causa: {hint})" if hint else "")
+                        + ". NAO corras o codigo outra vez sem o alterar: corrige "
+                        "a causa concreta (coluna em falta, separador ';' do CSV, "
+                        "caminho) e SÓ DEPOIS volta a executar."
+                    )
+                    if block_count >= 4:
+                        loop_msg = (
+                            "[LOOP DETETADO — TURNO ENCERRADO] O mesmo erro "
+                            f"repetiu-se {block_count} vezes sem correcao — "
+                            "paro aqui para nao gastar iteracoes. Na resposta "
+                            "final, diz ao utilizador o que conseguiste fazer e "
+                            "o que ficou por fazer."
+                        )
+                    yield {"type": "tool_result", "name": name, "result": loop_msg}
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": loop_msg,
+                    })
+                    if block_count >= 4:
+                        yield {
+                            "type": "info",
+                            "content": "o modelo repetiu o mesmo erro 4x — a parar o turno.",
+                        }
+                        return
+                else:
+                    yield {"type": "tool_result", "name": name, "result": result}
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": result,
+                    })
             # IMAGENS DEPOIS de todos os tool results: o chat_stream so manda
             # os pixels da mensagem mais recente que os tem (img_owner), por
             # isso esta mensagem tem de ser a ULTIMA da ronda.
