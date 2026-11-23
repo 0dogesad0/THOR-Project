@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import fnmatch
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -68,6 +69,68 @@ def _resolve(path: str, root: Path | None = None) -> Path:
     if not p.is_absolute():
         p = (root or _root()) / p
     return Path(os.path.normpath(str(p)))
+
+
+def _clean_path(path: Any) -> str:
+    """Caminho vindo do modelo: tira aspas/espacos que costumam acompanhar
+    ("C:\\f.csv", 'foto.jpg', '  x.csv  ') — sem isto o read_file dava
+    "Nao existe" para um ficheiro que la esta."""
+    p = str(path or "").strip()
+    while len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'":
+        p = p[1:-1].strip()
+    return p
+
+
+def _resolve_read(path: Any, root: Path | None = None) -> Path:
+    """Resolve um caminho para LEITURA, com procura de reserva.
+
+    O modelo costuma usar so o nome ("steam_jogos.csv", "foto.jpeg") e os
+    anexos ficam em .thor/uploads — sem esta procura, read_file/view_image
+    devolviam "Nao existe" e o turno entrava em loop de tentativas.
+    Procura: caminho normal -> .thor/uploads/<nome> -> subpastas de 1 nivel."""
+    p = _resolve(_clean_path(path), root)
+    if p.exists() or not p.name:
+        return p
+    name = p.name
+    up = _root() / THOR_DIR / "uploads" / name
+    if up.is_file():
+        return up
+    matches: list[Path] = []
+    try:
+        for child in sorted(_root().iterdir(), key=lambda e: e.name.lower()):
+            if child.is_dir() and child.name not in _DEFAULT_IGNORE:
+                cand = child / name
+                if cand.is_file():
+                    matches.append(cand)
+    except OSError:
+        matches = []
+    # so usa a reserva se for inequivoco: escolher às cegas o ficheiro com o
+    # mesmo nome de outra pasta podia fazer o modelo ler dados errados.
+    if len(matches) == 1:
+        return matches[0]
+    return p
+
+
+def _read_text(target: Path) -> str:
+    """Le texto com detecao de codificacao.
+
+    UTF-8 com BOM (os CSVs do utilizador vem assim), UTF-8 puro, e em falha
+    CP1252 — o antigo `errors="replace"` trocava os acentos por '?' e lixava
+    colunas e titulos lidos pelo modelo."""
+    data = target.read_bytes()
+    if data.startswith(b"\xef\xbb\xbf"):
+        try:
+            return data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            pass
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode("cp1252")
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="replace")
 
 
 def _thor_dir() -> Path:
@@ -207,11 +270,14 @@ _BINARY_EXTS = {
 
 
 def read_file(path: str, offset: int = 0, limit: int = 500) -> str:
-    target = _resolve(path)
+    target = _resolve_read(path)
     if not target.exists():
-        return f"[erro] Nao existe: {target}"
+        return (
+            f"[erro] Nao existe: {target}. Confirma o nome com list_dir "
+            "(procura tambem em .thor/uploads)."
+        )
     if target.is_dir():
-        return f"[erro] E um diretorio: {target}"
+        return f"[erro] E um diretorio: {target}. Usa list_dir para ver o conteudo."
     # binario ( imagem, zip, ... ): NUNCA devolver como texto. Um JPEG tem
     # ~47k "linhas" de lixo que gastam o contexto todo e arruynam o turno.
     if target.suffix.lower() in _BINARY_EXTS:
@@ -240,7 +306,7 @@ def read_file(path: str, offset: int = 0, limit: int = 500) -> str:
     except Exception:
         pass
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
+        text = _read_text(target)
     except Exception as e:
         return f"[erro] {e}"
     lines = text.splitlines()
@@ -267,7 +333,7 @@ def load_image(path: str) -> dict[str, Any] | str:
     Devolve {"name", "mime", "data", "path"} ou uma string de erro.
     Os pixels NUNCA entram no contexto como texto (so como partes de imagem
     no pedido ao llama-server, processadas pelo mmproj)."""
-    target = _resolve(path)
+    target = _resolve_read(path)
     if not target.exists():
         return f"[erro] Nao existe: {target}"
     if target.is_dir():
@@ -804,13 +870,95 @@ OLLAMA_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+# aliases de argumentos que os modelos locais costumam emitir
+_ARG_ALIASES: dict[str, str] = {
+    "file_path": "path", "filepath": "path", "filename": "path", "file": "path",
+    "nome": "path", "ficheiro": "path", "caminho": "path", "nome_ficheiro": "path",
+    "text": "content", "file_text": "content", "conteudo": "content",
+    "dados": "content", "body": "content",
+    "old_str": "old_string", "new_str": "new_string",
+    "cmd": "command", "shell": "command", "comando": "command",
+    "q": "query", "procura": "query", "glob": "pattern", "file_pattern": "pattern",
+    "u": "url", "link": "url",
+    "dir": "path", "directory": "path", "folder": "path",
+}
+
+
+def _coerce(value: Any, pname: str, ann: str) -> Any:
+    """Converte o valor para o tipo que a ferramenta espera.
+
+    O modelo local manda "offset": "0" ou "timeout": "30" (string) e antes
+    rebentava com TypeError — que o modelo via como erro fixo e repetia a
+    chamada 5x ate o turno ser fechado."""
+    if isinstance(value, (dict, list)) or value is None:
+        return value
+    ann = (ann or "").lower()
+    is_int = "int" in ann or pname in {"offset", "limit", "timeout", "index",
+                                       "max_results", "max_chars"}
+    is_bool = "bool" in ann or pname in {"background", "force"}
+    if is_bool and isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes", "y", "sim", "on"):
+            return True
+        if low in ("false", "0", "no", "n", "nao", "off"):
+            return False
+    if is_int:
+        try:
+            return int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and "str" in ann:
+        return str(value)
+    return value
+
+
 def execute_tool(name: str, args: dict[str, Any]) -> str:
     fn = TOOL_FUNCTIONS.get(name)
     if fn is None:
         return f"[erro] Ferramenta desconhecida: {name}"
+    if not isinstance(args, dict):
+        args = {}
+    # chaves INTERNAS do agente nunca sao parametros da ferramenta:
+    #  - "_raw"       : JSON de argumentos que nao chegou a parsear
+    #  - "_truncated" : geracao cortada a meio (conteudo incompleto)
+    # Antes iam para fn(**args) e rebentavam com
+    # "unexpected keyword argument '_raw'" — o mesmo erro 5x = loop.
+    args = {k: v for k, v in args.items() if not str(k).startswith("_")}
+
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.values())
+    known = {p.name for p in params}
+    clean: dict[str, Any] = {}
+    unknown: list[str] = []
+    for k, v in args.items():
+        if k in known:
+            clean[k] = v
+            continue
+        k2 = _ARG_ALIASES.get(str(k).lower())
+        if k2 and k2 in known and k2 not in clean:
+            clean[k2] = v
+        else:
+            unknown.append(str(k))
+    for p in params:
+        if p.name not in clean:
+            continue
+        ann = p.annotation if isinstance(p.annotation, str) else (
+            getattr(p.annotation, "__name__", "") or "")
+        clean[p.name] = _coerce(clean[p.name], p.name, ann)
+
+    missing = [p.name for p in params
+               if p.default is inspect.Parameter.empty and p.name not in clean]
+    if missing:
+        return (
+            f"[erro] Faltam argumentos obrigatorios em {name}: "
+            f"{', '.join(missing)}. Aceites: {sorted(known)}."
+            + (f" Ignorados (desconhecidos): {unknown}." if unknown else "")
+            + " Corrige os argumentos e volta a chamar — NAO repitas a mesma chamada."
+        )
     try:
-        return str(fn(**args))
+        return str(fn(**clean))
     except TypeError as e:
-        return f"[erro] Argumentos invalidos para {name}: {e}"
+        return (f"[erro] Argumentos invalidos para {name}: {e}. "
+                f"Aceites: {sorted(known)}. Corrige e volta a chamar.")
     except Exception as e:
         return f"[erro] {type(e).__name__}: {e}"

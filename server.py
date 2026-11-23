@@ -671,10 +671,23 @@ class Handler(BaseHTTPRequestHandler):
             except UnicodeDecodeError:
                 text = None
         if text is not None:
+            # guarda TAMBEM em disco: o conteudo vai inline na mensagem, mas o
+            # modelo pode querer re-ler o ficheiro com read_file — sem copia em
+            # .thor/uploads dava "Nao existe" (falha de leitura) e ele tentava
+            # outra vez o mesmo caminho. Guarda os BYTES originais (o inline
+            # fica truncado aos 60k, o disco nao).
+            path = ""
+            try:
+                updir.mkdir(parents=True, exist_ok=True)
+                dest = updir / name
+                dest.write_bytes(raw)
+                path = str(dest)
+            except Exception:
+                path = ""
             if len(text) > 60000:
                 text = text[:60000] + "\n... [truncado]"
             self._json({"ok": True, "kind": "text", "name": name, "content": text,
-                        "chars": len(text)})
+                        "chars": len(text), "path": path})
             return
 
         # binario: guarda e devolve o caminho — o agente trabalha sobre ele
@@ -738,6 +751,20 @@ class Handler(BaseHTTPRequestHandler):
         attached_images = bool(images)
         if not images:
             images = _disk_images()
+
+        # Anexos de TEXTO: o conteudo ja vem inline na mensagem, mas o modelo
+        # pode (e costuma) tentar re-ler o ficheiro. Sem este aviso o
+        # read_file dava "Nao existe" e o turno gastava tentativas no mesmo
+        # caminho. Caminho RELATIVO de proposito: um C:\ absoluto aqui era
+        # apanhado pelo extract_target_dir e mudava a pasta de trabalho.
+        non_img = [p for p in att_paths if p not in img_paths]
+        if non_img:
+            rels = [f".thor/uploads/{Path(p).name}" for p in non_img]
+            message += (
+                "\n[Ficheiros anexados guardados em disco — se precisares de "
+                "os rever, le com read_file estes caminhos: "
+                + ", ".join(rels) + "]"
+            )
 
         sid, sess = get_session(str(body.get("session_id", "")))
         title = set_title_if_needed(sess, message)

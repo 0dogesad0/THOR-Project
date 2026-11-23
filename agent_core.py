@@ -75,6 +75,12 @@ Examples of correct paths: "schema.sql", "index.php", "api.php", "app.py"
 Do NOT create nested folders like cars/cars/public/...
 Do NOT invent extra folders unless the user asked for them.
 
+BIG FILE RULE (critical — violating this truncates your call):
+NEVER send a whole large file in ONE write_file: the generation gets CUT and the
+call arrives as truncated/invalid arguments (the tool will answer "Argumentos
+TRUNCADOS"). Max ~250 lines per write_file. For a bigger file: write the first
+part, then append the rest in small blocks with edit_file.
+
 If the user message says [Working directory is now: X], all files go into X with simple names.
 
 MULTI-FILE RULE:
@@ -203,7 +209,7 @@ def chat_stream(
     *,
     system: str | None = None,
     tools: bool = True,
-    max_tokens: int = 4096,
+    max_tokens: int = 8192,
 ) -> Iterator[dict[str, Any]]:
     """Gera {"delta": texto}* seguido de {"message": {...}}. Emite StopRequested se pedirem paragem.
 
@@ -347,7 +353,11 @@ def chat_stream(
             try:
                 tc["function"]["arguments"] = json.loads(raw_args)
             except json.JSONDecodeError:
-                tc["function"]["arguments"] = {"_raw": raw_args[:500]}
+                # JSON incompleto/ilegivel (quebras de linha literais dentro do
+                # content, ou geracao cortada a meio). Guarda TUDO — o antigo
+                # [:500] destruia o conteudo do ficheiro — e deixa parse_args
+                # reconstruir os argumentos.
+                tc["function"]["arguments"] = {"_raw": raw_args[:400_000]}
     if not tool_calls and content:
         tool_calls = _extract_tool_calls_from_text(content)
     yield {"message": {"role": "assistant", "content": content, "tool_calls": tool_calls}}
@@ -411,28 +421,189 @@ def _extract_tool_calls_from_text(text: str) -> list[dict[str, Any]]:
     return calls
 
 
-def parse_args(raw_args: Any) -> dict[str, Any]:
-    if isinstance(raw_args, dict):
-        return raw_args
-    if not raw_args:
-        return {}
-    if isinstance(raw_args, str):
+# ---------------------------------------------------------------------------
+# Reconstrucao de argumentos de ferramenta
+#
+# O modelo local emite JSON de argumentos com defeitos recorrentes:
+#   1. quebras de linha LITERAIS dentro do "content" (json.loads recusa);
+#   2. geracao cortada a meio por max_tokens (JSON sem fechar);
+#   3. argumentos a chegar como string solta (extraidos do texto).
+# Todos acabavam em {"_raw": ...} e da para fn(**{"_raw": ...}) nascia o
+# "unexpected keyword argument '_raw'" que o modelo repetia 5x = loop.
+# ---------------------------------------------------------------------------
+
+_ARG_KEYS = (
+    "path", "content", "old_string", "new_string", "patch", "command",
+    "pattern", "query", "url", "source", "destination", "file_glob",
+    "offset", "limit", "timeout", "background", "max_results", "max_chars",
+    "index", "todos",
+)
+
+
+def _escape_control_chars(s: str) -> str:
+    """Escapa quebras de linha/tabs LITERAIS dentro de strings JSON.
+
+    Escrever um ficheiro .py significa meter \\n reais no JSON — o modelo
+    local emite-os como saltos de linha proprios e o json.loads falha."""
+    out: list[str] = []
+    in_str = False
+    esc = False
+    for ch in s:
+        if not in_str:
+            out.append(ch)
+            if ch == '"':
+                in_str = True
+            continue
+        if esc:
+            out.append(ch)
+            esc = False
+        elif ch == "\\":
+            out.append(ch)
+            esc = True
+        elif ch == '"':
+            out.append(ch)
+            in_str = False
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _repair_json(raw: str) -> dict[str, Any] | None:
+    """JSON direto -> reparado (quebras literais, virgulas finais) -> prefixo."""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if not s.startswith("{"):
+        i = s.find("{")
+        if i < 0:
+            return None
+        s = s[i:]
+    for cand in (s, _escape_control_chars(s)):
+        cand = re.sub(r",\s*([}\]])", r"\1", cand)  # virgulas finais
         try:
-            return json.loads(raw_args)
+            obj = json.loads(cand)
+            if isinstance(obj, dict):
+                return obj
         except json.JSONDecodeError:
             pass
-        m = re.search(r'"path"\s*:\s*"([^"]+)"', raw_args)
-        c = re.search(r'"content"\s*:\s*"(.*)"\s*}', raw_args, re.S)
-        if m:
-            args: dict[str, Any] = {"path": m.group(1)}
-            if c:
-                args["content"] = c.group(1).replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
-            elif '"command"' in raw_args:
-                mc = re.search(r'"command"\s*:\s*"([^"]+)"', raw_args)
-                if mc:
-                    args = {"command": mc.group(1)}
-            return args
-    return {"_raw": str(raw_args)[:500]}
+        try:  # primeiro objeto completo, com lixo a seguir
+            obj, _ = json.JSONDecoder().raw_decode(cand)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _extract_field(raw: str, key: str) -> Any:
+    """Le um campo do JSON partido: string (com escapes, ou cortada ao meio),
+    objeto/array (varredura de profundidade) ou escalar."""
+    m = re.search(r"""['"]%s['"]\s*:\s*""" % re.escape(key), raw)
+    if not m:
+        return None
+    i = m.end()
+    if i >= len(raw):
+        return None
+    ch = raw[i]
+    if ch in "\"'":
+        out: list[str] = []
+        j = i + 1
+        while j < len(raw):
+            c = raw[j]
+            if c == "\\" and j + 1 < len(raw):
+                nxt = raw[j + 1]
+                out.append({"n": "\n", "r": "\r", "t": "\t"}.get(nxt, nxt))
+                j += 2
+                continue
+            if c == ch:
+                return "".join(out)
+            out.append(c)
+            j += 1
+        return "".join(out)  # string sem fechar: o conteudo vai ate ao fim
+    if ch in "{[":
+        depth = 0
+        for j in range(i, len(raw)):
+            if raw[j] in "{[":
+                depth += 1
+            elif raw[j] in "}]":
+                depth -= 1
+                if depth == 0:
+                    frag = raw[i:j + 1]
+                    try:
+                        return json.loads(frag)
+                    except json.JSONDecodeError:
+                        return None
+        return None
+    m2 = re.match(r"[^,}\]\s]+", raw[i:])
+    if m2:
+        frag = m2.group(0)
+        try:
+            return json.loads(frag)
+        except json.JSONDecodeError:
+            return frag.rstrip(",")
+    return None
+
+
+def _recover_args(raw: Any) -> dict[str, Any] | None:
+    """Reconstroi os argumentos de uma chamada a partir de JSON partido."""
+    text = str(raw or "")
+    if not text.strip():
+        return None
+    obj = _repair_json(text)
+    if obj:
+        return obj
+    fields: dict[str, Any] = {}
+    for key in _ARG_KEYS:
+        val = _extract_field(text, key)
+        if val is not None and val != "":
+            fields[key] = val
+    if not fields:
+        return None
+    if not text.strip().endswith(("}", "]")):
+        # JSON sem fechar = geracao cortada: o conteudo esta incompleto e
+        # escreve-lo em silencio criava ficheiros/edicoes a meio.
+        fields["_truncated"] = True
+    return fields
+
+
+def parse_args(raw_args: Any) -> dict[str, Any]:
+    """Argumentos de uma chamada de ferramenta, mesmo quando o JSON veio
+    partido. Devolve sempre um dict utilizavel; "_truncated": True marca
+    conteudo cortado (o chamador decide — nunca executa pela metade)."""
+    if isinstance(raw_args, dict):
+        if "_raw" in raw_args:
+            rec = _recover_args(raw_args.get("_raw"))
+            if rec:
+                extras = {k: v for k, v in raw_args.items() if k != "_raw"}
+                extras.update(rec)
+                return extras
+            return {"_truncated": True}
+        return dict(raw_args)
+    if raw_args is None:
+        return {}
+    if isinstance(raw_args, str):
+        s = raw_args.strip()
+        if not s:
+            return {}
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        rec = _recover_args(s)
+        if rec:
+            return rec
+        return {"_truncated": True}
+    return {"_truncated": True}
 
 
 _WIN_PATH_RE = re.compile(r"([A-Za-z]:\\(?:[^\\\s\"'\n\r]+\\)*[^\\\s\"'\n\r]+)")
@@ -598,7 +769,15 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
                 name = fn.get("name", "?")
                 call_id = tc.get("id", f"call_{int(time.time()*1000)}")
                 args = parse_args(fn.get("arguments") or {})
-                preview = json.dumps(args, ensure_ascii=False)
+                # "_truncated" = o modelo nao chegou a fechar o JSON (geracao
+                # cortada). NUNCA se executa pela metade: escrever um content
+                # incompleto corrompia o ficheiro e o modelo seguia como se
+                # estivesse tudo feito.
+                truncated = bool(args.pop("_truncated", False))
+                preview = (
+                    "<argumentos truncados/incompletos>" if truncated
+                    else json.dumps(args, ensure_ascii=False)
+                )
                 sig = name + " " + preview
                 if sig == last_sig:
                     same_count += 1
@@ -636,12 +815,11 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
                     result = (
                         "[LOOP DETETADO] Esta e a "
                         f"{same_count + 1}a vez seguida que chamas {name} com "
-                        "EXATAMENTE os mesmos argumentos — a resposta nao vai "
-                        "mudar. NAO repitas a chamada. Muda de abordagem: escreve "
-                        "o codigo num ficheiro .py (write_file) e corre-o com "
-                        "'python ficheiro.py', ou usa write_file diretamente para "
-                        "criar os ficheiros pedidos. Se ja tens informacao "
-                        "suficiente, responde ao utilizador."
+                        "EXATAMENTE os mesmos argumentos — o resultado sera "
+                        "sempre identico, por isso NAO repitas a chamada. "
+                        "Corrige os argumentos (caminho, content/old_string, "
+                        "tipos), usa outra ferramenta, ou se ja tens informacao "
+                        "suficiente responde ao utilizador."
                     )
                     yield {"type": "tool_result", "name": name, "result": result}
                     messages.append({
@@ -653,7 +831,16 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
                     # mantem last_sig: qualquer repeticao seguinte fica bloqueada
                     continue
                 yield {"type": "tool_start", "name": name, "args": preview}
-                if name == "view_image":
+                if truncated:
+                    result = (
+                        "[erro] Argumentos TRUNCADOS: a chamada chegou cortada "
+                        "a meio (JSON incompleto) — o conteudo nao chegou todo. "
+                        "NAO reenvies esta mesma chamada grande. Divide o "
+                        "trabalho: write_file com a primeira parte (max ~250 "
+                        "linhas) e acrescenta o resto em blocos com edit_file; "
+                        "em leituras usa read_file com offset/limit."
+                    )
+                elif name == "view_image":
                     # o agente pede para VER uma imagem do disco: carrega os
                     # pixels e anexa-os a conversa (ver pending_images abaixo)
                     img = load_image(str(args.get("path") or ""))

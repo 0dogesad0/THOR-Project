@@ -728,6 +728,9 @@ async function send() {
     } else if (a.content) {
       full += '\n\n--- Ficheiro: ' + a.name + ' ---\n' + a.content + '\n--- fim ---';
       names.push(a.name);
+      // o servidor guarda uma copia do ficheiro em .thor/uploads: leva o
+      // caminho tambem, para o agente poder re-ler o original com read_file
+      if (a.path) atts.push({ kind: 'file', name: a.name, path: a.path });
     } else if (a.path) {
       full += '\n[Ficheiro: ' + a.name + ']';
       names.push(a.name);
