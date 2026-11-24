@@ -47,27 +47,30 @@ TEXT_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".php", ".sql
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
-def _disk_images(limit: int = 6) -> list[dict[str, Any]]:
+def _disk_images(limit: int = 6, max_total: int = 20 * 1024 * 1024) -> list[dict[str, Any]]:
     """Imagens de topo na pasta de trabalho, em base64.
 
     Caso classico: enunciado em JPEGs de WhatsApp ao lado dos CSVs e o
     utilizador nao anexa nada (so escreve "faz o exercicio"). O OpenCode nao
     ve pixels, por isso o Thor carrega estas imagens e transcreve-as ANTES de
-    delegar — o OpenCode recebe o TEXTO. Max `limit` imagens (cada uma ate
-    12MB, validado por tools.load_image)."""
+    delegar — o OpenCode recebe o TEXTO. Limites: `limit` imagens e
+    `max_total` bytes de origem (uma pasta com 20 fotos nao deve encher o
+    pedido nem a RAM da sessao)."""
     out: list[dict[str, Any]] = []
+    total = 0
     try:
         entries = sorted(Path.cwd().iterdir(), key=lambda p: p.name.lower())
     except OSError:
         return out
     for p in entries:
-        if len(out) >= limit:
+        if len(out) >= limit or total >= max_total:
             break
         if p.suffix.lower() not in IMG_EXTS or not p.is_file():
             continue
         img = load_image(str(p))
         if not isinstance(img, str):
             out.append(img)
+            total += p.stat().st_size
     return out
 
 
@@ -727,8 +730,23 @@ class Handler(BaseHTTPRequestHandler):
                 })
         images = images[:8]  # 8 imagens max por pedido (cada uma ate 1280 tokens + texto)
 
+        # sem anexos: imagens da pasta de trabalho (caso classico: enunciado em
+        # fotos de WhatsApp ao lado dos CSVs e o utilizador so escreve "faz o
+        # exercicio"). Descobre JA AQUI para (a) o dispatch saber que ha imagens
+        # (ve os pixels e decide melhor) e (b) o caminho direto as anexar.
+        # O caminho delegado recebe o TEXTO transcrito, nunca os pixels.
+        attached_images = bool(images)
+        if not images:
+            images = _disk_images()
+
         sid, sess = get_session(str(body.get("session_id", "")))
         title = set_title_if_needed(sess, message)
+        # RAM: so a mensagem mais recente com imagens as mantem — o chat_stream
+        # ja so envia as da ultima, aqui libertamos as das anteriores (cada
+        # par de fotos em base64 pesa ~1-2 MB por turno acumulado).
+        img_idx = [i for i, m in enumerate(sess["messages"]) if m.get("images")]
+        for i in img_idx[:-1]:
+            del sess["messages"][i]["images"]
 
         if not ensure_llama():
             self._json({"ok": False, "error": "llama-server nao arrancou. Corre start.bat e verifica o modelo."}, 503)
@@ -832,13 +850,12 @@ class Handler(BaseHTTPRequestHandler):
             # O OpenCode nao ve pixels. Sem a transcricao lia JPEG como binario,
             # chamava a ferramenta question e o watchdog abortava aos 180s.
             vision_text = ""
-            if not images:
-                # sem anexos: se a pasta de trabalho tem imagens (enunciado em
-                # fotos ao lado dos CSVs), o Thor carrega-as e le-as — o
-                # OpenCode recebe o TEXTO transcrito, nunca os pixels.
-                disk_imgs = _disk_images()
-                if disk_imgs:
-                    images = disk_imgs
+            if not attached_images:
+                # (re)descobre na pasta ACTUAL — extract_target_dir pode ter
+                # mudado o cwd entretanto. Sem anexos, o Thor le as imagens e
+                # passa o TEXTO ao OpenCode — ele recebe pixels NUNCA.
+                images = _disk_images()
+                if images:
                     emit({
                         "type": "info",
                         "content": f"Thor: {len(images)} imagem(ns) na pasta de trabalho — a ler o enunciado…",
