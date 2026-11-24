@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterator
 
-from tools import OLLAMA_TOOLS, execute_tool
+from tools import OLLAMA_TOOLS, execute_tool, load_image
 
 # A consola Windows usa cp1252 por omissão: sem isto, qualquer print com ⏹/emoji
 # (vindo do utilizador ou do modelo) levanta UnicodeEncodeError e mata o turno.
@@ -106,6 +106,29 @@ When the user message carries image parts, you can SEE them — describe, read
 text in them (OCR), compare, count and reason about their content. Never claim
 you cannot see an image when parts are present. Work with the images as well
 as with any attached files.
+NEVER call read_file on an image or binary file (.jpg .jpeg .png .gif .webp
+.pdf .zip .gguf ...) — it is not text and read_file will only return a warning.
+If image parts are present you already see the pixels; use them directly.
+IMAGE ON DISK: to SEE an image that exists in the working folder (not attached
+to the message), call view_image {"path": "nome.jpg"}. The pixels are attached
+to the conversation right after the tool result and from then on you see them —
+then read the text (OCR), describe and use the content. Never try to read an
+image as text and never run OCR tools when view_image exists.
+
+WORKSPACE RULE:
+Work ONLY inside the current working directory: create/edit/delete files there
+using simple relative names. Reads outside are allowed, writes are NOT — any
+write outside the workspace is rejected. Existing data files (CSV, JSON, images,
+etc.) belong to the user: READ them, never modify or delete them; put results
+in NEW files only.
+
+COMMAND RULE (Windows):
+The shell cuts multi-line commands. NEVER send python -c with the code spanning
+several lines — it returns exit_code 0 with EMPTY output and you will be stuck
+repeating it. To run multi-line Python: 1) write_file "script.py" with the
+full code, then 2) run_command "python script.py". Then read the stdout.
+If a tool result says LOOP DETETADO, you MUST change approach — repeating the
+same call can never produce a different result.
 """
 
 
@@ -349,9 +372,9 @@ def _extract_tool_calls_from_text(text: str) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
     for m in re.finditer(r'"name"\s*:\s*"([a-z_]+)"', text):
         name = m.group(1)
-        if name not in ("write_file", "read_file", "edit_file", "create_directory", "delete_file",
-                        "copy_file", "move_file", "run_command", "list_dir", "glob_files",
-                        "grep_search", "apply_patch", "todowrite", "undo_last"):
+        if name not in ("write_file", "read_file", "view_image", "edit_file", "create_directory",
+                        "delete_file", "copy_file", "move_file", "run_command", "list_dir",
+                        "glob_files", "grep_search", "apply_patch", "todowrite", "undo_last"):
             continue
         start = text.rfind("{", 0, m.start())
         if start < 0:
@@ -524,6 +547,10 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
     STOP_EVENT.clear()
     messages.append(prepare_user_message(user_text, images))
     had_tools = False
+    # guarda anti-loop: assinatura (nome+args) da ultima chamada e quantas
+    # vezes seguidas o modelo repetiu EXATAMENTE a mesma chamada.
+    last_sig: str | None = None
+    same_count = 0
     try:
         for _turn in range(MAX_ITERATIONS):
             if STOP_EVENT.is_set():
@@ -565,20 +592,103 @@ def run_turn_events(messages: list[dict[str, Any]], user_text: str,
                     continue
                 return
             had_tools = True
+            pending_images: list[dict[str, Any]] = []
             for tc in reply["tool_calls"]:
                 fn = tc.get("function") or {}
                 name = fn.get("name", "?")
                 call_id = tc.get("id", f"call_{int(time.time()*1000)}")
                 args = parse_args(fn.get("arguments") or {})
                 preview = json.dumps(args, ensure_ascii=False)
+                sig = name + " " + preview
+                if sig == last_sig:
+                    same_count += 1
+                else:
+                    last_sig, same_count = sig, 0
+                # 3x a MESMA chamada seguida = loop: nao executa mais, devolve
+                # instrucao clara para mudar de abordagem. Se o modelo ignorar
+                # e repetir mais 2x, fecha o turno — 40 iteracoes gastadas a
+                # ver o mesmo resultado nao sao trabalho, sao um loop.
+                if same_count >= 2:
+                    yield {"type": "tool_start", "name": name, "args": preview}
+                    if same_count >= 4:
+                        result = (
+                            "[LOOP DETETADO — TURNO ENCERRADO] Chamas a mesma "
+                            f"{name} com os mesmos argumentos 5 vezes seguidas. "
+                            "O resultado e sempre identico, por isso paro aqui. "
+                            "Na resposta final, diz ao utilizador o que conseguiste "
+                            "fazer e o que ficou por fazer."
+                        )
+                        yield {"type": "tool_result", "name": name, "result": result}
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "name": name,
+                            "content": result,
+                        })
+                        yield {
+                            "type": "info",
+                            "content": (
+                                "o modelo repetiu a mesma chamada 5x — a parar o "
+                                "turno para nao gastar iteracoes."
+                            ),
+                        }
+                        return
+                    result = (
+                        "[LOOP DETETADO] Esta e a "
+                        f"{same_count + 1}a vez seguida que chamas {name} com "
+                        "EXATAMENTE os mesmos argumentos — a resposta nao vai "
+                        "mudar. NAO repitas a chamada. Muda de abordagem: escreve "
+                        "o codigo num ficheiro .py (write_file) e corre-o com "
+                        "'python ficheiro.py', ou usa write_file diretamente para "
+                        "criar os ficheiros pedidos. Se ja tens informacao "
+                        "suficiente, responde ao utilizador."
+                    )
+                    yield {"type": "tool_result", "name": name, "result": result}
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": result,
+                    })
+                    # mantem last_sig: qualquer repeticao seguinte fica bloqueada
+                    continue
                 yield {"type": "tool_start", "name": name, "args": preview}
-                result = execute_tool(name, args)
+                if name == "view_image":
+                    # o agente pede para VER uma imagem do disco: carrega os
+                    # pixels e anexa-os a conversa (ver pending_images abaixo)
+                    img = load_image(str(args.get("path") or ""))
+                    if isinstance(img, str):
+                        result = img  # erro (nao existe / nao e imagem)
+                    else:
+                        pending_images.append(img)
+                        result = (
+                            f"[imagem carregada] {img['name']} "
+                            f"({img['mime']}) — os pixels seguem ANEXADOS a "
+                            "conversa depois destas ferramentas. A partir de "
+                            "agora ves a imagem: le o texto (OCR), descreve e "
+                            "usa o conteudo para continuar o trabalho."
+                        )
+                else:
+                    result = execute_tool(name, args)
                 yield {"type": "tool_result", "name": name, "result": result}
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
                     "name": name,
                     "content": result,
+                })
+            # IMAGENS DEPOIS de todos os tool results: o chat_stream so manda
+            # os pixels da mensagem mais recente que os tem (img_owner), por
+            # isso esta mensagem tem de ser a ULTIMA da ronda.
+            if pending_images:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[view_image: os pixels das imagens pedidas seguem nesta "
+                        "mensagem — ves-as agora. Faz OCR/descricao e continua "
+                        "o trabalho com o que la esta escrito.]"
+                    ),
+                    "images": pending_images,
                 })
         yield {"type": "info", "content": "Limite de iteracoes de ferramentas atingido."}
     except RuntimeError as e:

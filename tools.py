@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import fnmatch
 import hashlib
 import json
@@ -73,6 +74,22 @@ def _thor_dir() -> Path:
     d = _root() / THOR_DIR
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _guard_writable(target: Path) -> str:
+    """Bloqueia escrita FORA da pasta de trabalho selecionada.
+
+    O utilizador pediu "trabalha so na pasta selecionada": leituras de fora
+    sao permitidas, mas criar/modificar/apagar so dentro do cwd. Devolve "" se
+    pode escrever, ou a mensagem de erro."""
+    try:
+        target.resolve().relative_to(_root().resolve())
+        return ""
+    except Exception:
+        return (
+            f"[erro] Fora da pasta de trabalho: {target}. "
+            f"Escreve APENAS dentro de {_root()} (usa nomes relativos)."
+        )
 
 
 def _load_gitignore(root: Path) -> set[str]:
@@ -180,12 +197,48 @@ def list_dir(path: str = ".") -> str:
     return "\n".join(lines) if lines else f"[vazio] {target}"
 
 
+# extensoes binarias: nunca devolver como texto (lixo que envenena o contexto)
+_BINARY_EXTS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".tif",
+    ".pdf", ".zip", ".rar", ".7z", ".gz", ".tar", ".exe", ".dll", ".so", ".dylib",
+    ".gguf", ".bin", ".db", ".sqlite", ".sqlite3", ".mp3", ".mp4", ".wav", ".avi",
+    ".mov", ".woff", ".woff2", ".ttf", ".otf", ".class", ".pyc", ".pyo",
+}
+
+
 def read_file(path: str, offset: int = 0, limit: int = 500) -> str:
     target = _resolve(path)
     if not target.exists():
         return f"[erro] Nao existe: {target}"
     if target.is_dir():
         return f"[erro] E um diretorio: {target}"
+    # binario ( imagem, zip, ... ): NUNCA devolver como texto. Um JPEG tem
+    # ~47k "linhas" de lixo que gastam o contexto todo e arruynam o turno.
+    if target.suffix.lower() in _BINARY_EXTS:
+        kind = "imagem" if target.suffix.lower() in {
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".tif",
+        } else "binario"
+        extra = (
+            f'Chama view_image {{"path": "{target.name}"}} para VERES os pixels '
+            "(o modelo anexa a imagem e faz OCR/descricao). Nunca leias um JPEG "
+            "como texto — so lixo binario."
+            if kind == "imagem" else
+            "Trabalha sobre este caminho com run_command (ex.: extrair/inspect), "
+            "nao o leias como texto."
+        )
+        return (
+            f"[{kind}] {target.name} ({target.stat().st_size} bytes, "
+            f"{target.suffix}) — nao e texto, read_file nao serve. {extra}"
+        )
+    try:
+        head = target.open("rb").read(4096)
+        if b"\x00" in head:  # binario disfarcado de texto
+            return (
+                f"[binario] {target.name} ({target.stat().st_size} bytes) — "
+                f"contem bytes nulos, nao e texto. Usa run_command para o tratar."
+            )
+    except Exception:
+        pass
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
@@ -199,8 +252,65 @@ def read_file(path: str, offset: int = 0, limit: int = 500) -> str:
     return f"{target}  (linhas {offset + 1}-{offset + len(chunk)} de {total})\n{body}"
 
 
+# --- visao: o agente VER imagens do disco -----------------------------------
+_IMG_MIME = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+    ".ico": "image/x-icon", ".tiff": "image/tiff", ".tif": "image/tiff",
+}
+MAX_IMAGE_BYTES = 12 * 1024 * 1024
+
+
+def load_image(path: str) -> dict[str, Any] | str:
+    """Carrega uma imagem do disco em base64 para o modelo a VER.
+
+    Devolve {"name", "mime", "data", "path"} ou uma string de erro.
+    Os pixels NUNCA entram no contexto como texto (so como partes de imagem
+    no pedido ao llama-server, processadas pelo mmproj)."""
+    target = _resolve(path)
+    if not target.exists():
+        return f"[erro] Nao existe: {target}"
+    if target.is_dir():
+        return f"[erro] E um diretorio: {target}"
+    mime = _IMG_MIME.get(target.suffix.lower())
+    if not mime:
+        return (
+            f"[erro] Nao e uma imagem ({target.suffix}): {target.name}. "
+            "view_image aceita .jpg .jpeg .png .gif .webp .bmp .tiff"
+        )
+    size = target.stat().st_size
+    if size > MAX_IMAGE_BYTES:
+        return f"[erro] Imagem demasiado grande ({size} bytes, max {MAX_IMAGE_BYTES})."
+    try:
+        data = base64.b64encode(target.read_bytes()).decode("ascii")
+    except Exception as e:
+        return f"[erro] Nao foi possivel abrir a imagem: {e}"
+    return {"name": target.name, "mime": mime, "data": data, "path": str(target)}
+
+
+def view_image(path: str) -> str:
+    """Ferramenta view_image — o agente usa-a para VER imagens do disco.
+
+    Em normal o loop do agente (agent_core.run_turn_events) intercepta esta
+    chamada e anexa os pixels a conversa; esta funcao e o fallback seguro
+    (valida a imagem e diz ao modelo o que fazer)."""
+    img = load_image(path)
+    if isinstance(img, str):
+        return img
+    nbytes = len(img["data"]) * 3 // 4
+    return (
+        f"[imagem] {img['name']} ({nbytes} bytes, {img['mime']}) validada e "
+        "pronta. OS PIXELS SEGUEM ANEXADOS a conversa — a partir de agora ves "
+        "a imagem: le o texto (OCR), descreve e continua o trabalho com o que "
+        "la esta escrito."
+    )
+
+
 def write_file(path: str, content: str) -> str:
     target = _resolve(path)
+    refused = _guard_writable(target)
+    if refused:
+        return refused
     existed = target.is_file()
     if existed:
         _snapshot(target, "write")
@@ -212,6 +322,9 @@ def write_file(path: str, content: str) -> str:
 
 def edit_file(path: str, old_string: str, new_string: str) -> str:
     target = _resolve(path)
+    refused = _guard_writable(target)
+    if refused:
+        return refused
     if not target.exists():
         return f"[erro] Nao existe: {target}"
     text = target.read_text(encoding="utf-8", errors="replace")
@@ -229,6 +342,9 @@ def apply_patch(path: str, patch: str) -> str:
     """Aplica um patch de bloco: linhas de contexto, -removidas e +adicionadas.
     Encontra o bloco (contexto + remocoes) no ficheiro e substitui-o por (contexto + adicoes)."""
     target = _resolve(path)
+    refused = _guard_writable(target)
+    if refused:
+        return refused
     if not target.exists():
         return f"[erro] Nao existe: {target}"
     original = target.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -269,6 +385,9 @@ def apply_patch(path: str, patch: str) -> str:
 
 def delete_file(path: str) -> str:
     target = _resolve(path)
+    refused = _guard_writable(target)
+    if refused:
+        return refused
     if not target.exists():
         return f"[erro] Nao existe: {target}"
     if target.is_dir():
@@ -284,6 +403,9 @@ def delete_file(path: str) -> str:
 def copy_file(source: str, destination: str) -> str:
     src = _resolve(source)
     dst = _resolve(destination)
+    refused = _guard_writable(dst)
+    if refused:
+        return refused
     if not src.exists():
         return f"[erro] Origem nao existe: {src}"
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -297,6 +419,9 @@ def copy_file(source: str, destination: str) -> str:
 def move_file(source: str, destination: str) -> str:
     src = _resolve(source)
     dst = _resolve(destination)
+    refused = _guard_writable(dst)
+    if refused:
+        return refused
     if not src.exists():
         return f"[erro] Origem nao existe: {src}"
     if src.is_file():
@@ -306,10 +431,62 @@ def move_file(source: str, destination: str) -> str:
     return f"Movido: {src} -> {dst}"
 
 
+def _python_c_argv(command: str) -> list[str] | None:
+    """Detecta `python -c "<codigo multi-linha>"` e devolve argv para executar
+    SEM shell.
+
+    No Windows o cmd.exe corta o comando no primeiro \\n: o `python -c`
+    multi-linha devolve exit_code 0 com stdout VAZIO (o modelo via "sucesso"
+    sem resultado e repetia o comando 40x a espera que aparecesse algo).
+    Passar o codigo diretamente em argv contorna o cmd.exe por completo.
+    """
+    m = re.match(r"""^\s*((?:py|python)[\d.]*)\s+-c\s+(["'])(.*)\2\s*$""", command or "", re.S)
+    if not m or "\n" not in command:
+        return None
+    exe = shutil.which(m.group(1)) or (sys.executable if m.group(1).startswith("py") else None)
+    if not exe:
+        return None
+    return [exe, "-c", m.group(3)]
+
+
 def run_command(command: str, timeout: int = 120, background: bool = False) -> str:
     dangerous = bool(re.search(r"\b(remove|rmdir|rd|del|format|Remove-Item|Clear-Content|Stop-Process|taskkill)\b", command, re.I))
     if dangerous and not _confirm(f"Executar comando potencialmente destrutivo: {command}?"):
         return "Cancelado pelo utilizador."
+    direct = None if background else _python_c_argv(command)
+    if direct:
+        try:
+            proc = subprocess.run(
+                direct, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout, cwd=str(_root()),
+            )
+        except subprocess.TimeoutExpired:
+            return f"[erro] Timeout {timeout}s: {command}"
+        except Exception as e:
+            return f"[erro] {e}"
+        parts = [f"exit_code: {proc.returncode}"]
+        if proc.stdout:
+            out = proc.stdout if len(proc.stdout) <= 8000 else proc.stdout[:8000] + "\n... [truncado]"
+            parts.append("stdout:\n" + out)
+        if proc.stderr:
+            err = proc.stderr if len(proc.stderr) <= 4000 else proc.stderr[:4000] + "\n... [truncado]"
+            parts.append("stderr:\n" + err)
+        if not proc.stdout and not proc.stderr:
+            parts.append("(sem saida — o comando nao produziu output)")
+        return "\n".join(parts)
+    # Qualquer outro comando multi-linha tambem morre silenciosamente no
+    # cmd.exe. Se as aspas estao equilibradas por linha, junta numa so linha
+    # (each line e um comando completo); senao, explica ao modelo o que fazer.
+    if "\n" in (command or ""):
+        lines = [ln for ln in command.splitlines() if ln.strip()]
+        if lines and all(ln.count('"') % 2 == 0 for ln in lines):
+            command = " & ".join(lines)
+        else:
+            return (
+                "[erro] Comando multi-linha com aspas que atravessam linhas — o "
+                "shell do Windows corta-o e devolve saida vazia. Escreve o codigo "
+                "num ficheiro .py (write_file) e corre-o com: python nome.py"
+            )
     if background:
         try:
             proc = subprocess.Popen(
@@ -364,22 +541,47 @@ def collect_background(index: int = 0) -> str:
 
 
 def glob_files(pattern: str, path: str = ".") -> str:
+    """Procura ficheiros por padrao (pathlib + fnmatch).
+
+    Corrige dois problemas que deixavam o Thor cego:
+      - `**/*` com fnmatch NUNCA casa "steam_atividade.csv" (falta a barra),
+        por isso a raiz devolvia "Nenhum ficheiro";
+      - `*.py` so apanhava a raiz em vez de todas as subpastas.
+    """
     root = _resolve(path)
     if not root.exists():
         return f"[erro] Nao existe: {root}"
-    patterns = _load_gitignore(root)
-    matches = []
-    for p in root.rglob("*"):
+    pat = (pattern or "*").strip() or "*"
+    gi = _load_gitignore(root)
+    matches: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: Path) -> None:
         if not p.is_file():
-            continue
+            return
         rel = str(p.relative_to(root)).replace("\\", "/")
-        if _is_ignored(rel, patterns):
-            continue
-        if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(p.name, pattern):
-            matches.append(rel)
-            if len(matches) >= 200:
-                matches.append("... [limite 200]")
-                break
+        if rel in seen or _is_ignored(rel, gi):
+            return
+        seen.add(rel)
+        matches.append(rel)
+
+    # 1) pathlib: entende "**/*", "sub/*.py", "*.csv" (caminhos reais)
+    try:
+        for p in root.glob(pat):
+            _add(p)
+    except Exception:
+        pass
+    # 2) fnmatch pelo nome: "*.py" sem barra apanha tambem subpastas e
+    #    "steam_atividade.csv" solto na raiz (caso que o "**/*" falhava)
+    if "/" not in pat and "\\" not in pat:
+        try:
+            for p in root.rglob("*"):
+                if p.is_file() and fnmatch.fnmatch(p.name, pat):
+                    _add(p)
+        except Exception:
+            pass
+    if len(matches) > 200:
+        matches = matches[:200] + ["... [limite 200]"]
     return "\n".join(matches) if matches else f"Nenhum ficheiro para: {pattern}"
 
 
@@ -416,6 +618,9 @@ def grep_search(pattern: str, path: str = ".", file_glob: str = "*") -> str:
 
 def create_directory(path: str) -> str:
     target = _resolve(path)
+    refused = _guard_writable(target)
+    if refused:
+        return refused
     target.mkdir(parents=True, exist_ok=True)
     return f"Diretorio criado/ok: {target}"
 
@@ -537,6 +742,7 @@ def webfetch(url: str, max_chars: int = 15000) -> str:
 TOOL_FUNCTIONS: dict[str, Callable[..., str]] = {
     "list_dir": list_dir,
     "read_file": read_file,
+    "view_image": view_image,
     "write_file": write_file,
     "edit_file": edit_file,
     "apply_patch": apply_patch,
@@ -576,6 +782,7 @@ B = {"type": "boolean"}
 OLLAMA_TOOLS: list[dict[str, Any]] = [
     _fn("list_dir", "MUST use to list folder contents. Shows files and subfolders.", {"path": S}),
     _fn("read_file", "MUST use to read a file's content with line numbers.", {"path": S, "offset": I, "limit": I}, ["path"]),
+    _fn("view_image", "MUST use to SEE an image on disk (.jpg .jpeg .png .gif .webp .bmp). The pixels are attached to the conversation so you can read text (OCR), describe and reason about the image. Never use read_file on images.", {"path": S}, ["path"]),
     _fn("write_file", "MUST use to CREATE a new file or OVERWRITE an existing one. Takes full file content.", {"path": S, "content": S}, ["path", "content"]),
     _fn("edit_file", "MUST use to MODIFY an existing file. Replaces one unique occurrence of old_string with new_string.", {"path": S, "old_string": S, "new_string": S}, ["path", "old_string", "new_string"]),
     _fn("apply_patch", "Apply a multi-line patch: lines with - removed, + added, space = context.", {"path": S, "patch": S}, ["path", "patch"]),

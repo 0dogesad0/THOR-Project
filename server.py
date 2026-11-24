@@ -19,7 +19,7 @@ from typing import Any
 
 import agent_core as core
 import opencode_bridge as ocb
-from tools import detect_environments, execute_tool, set_confirm_mode
+from tools import detect_environments, execute_tool, load_image, set_confirm_mode
 
 # A consola Windows usa cp1252 por omissão: sem isto, prints com ⏹/emojis vindos
 # do utilizador ou do modelo levantam UnicodeEncodeError e matam o turno
@@ -45,6 +45,30 @@ TEXT_EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".php", ".sql
              ".txt", ".csv", ".xml", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".bat", ".ps1",
              ".sh", ".c", ".cpp", ".h", ".java", ".go", ".rs", ".rb", ".env", ".gitignore"}
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+def _disk_images(limit: int = 6) -> list[dict[str, Any]]:
+    """Imagens de topo na pasta de trabalho, em base64.
+
+    Caso classico: enunciado em JPEGs de WhatsApp ao lado dos CSVs e o
+    utilizador nao anexa nada (so escreve "faz o exercicio"). O OpenCode nao
+    ve pixels, por isso o Thor carrega estas imagens e transcreve-as ANTES de
+    delegar — o OpenCode recebe o TEXTO. Max `limit` imagens (cada uma ate
+    12MB, validado por tools.load_image)."""
+    out: list[dict[str, Any]] = []
+    try:
+        entries = sorted(Path.cwd().iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return out
+    for p in entries:
+        if len(out) >= limit:
+            break
+        if p.suffix.lower() not in IMG_EXTS or not p.is_file():
+            continue
+        img = load_image(str(p))
+        if not isinstance(img, str):
+            out.append(img)
+    return out
 
 
 def new_session() -> str:
@@ -808,6 +832,17 @@ class Handler(BaseHTTPRequestHandler):
             # O OpenCode nao ve pixels. Sem a transcricao lia JPEG como binario,
             # chamava a ferramenta question e o watchdog abortava aos 180s.
             vision_text = ""
+            if not images:
+                # sem anexos: se a pasta de trabalho tem imagens (enunciado em
+                # fotos ao lado dos CSVs), o Thor carrega-as e le-as — o
+                # OpenCode recebe o TEXTO transcrito, nunca os pixels.
+                disk_imgs = _disk_images()
+                if disk_imgs:
+                    images = disk_imgs
+                    emit({
+                        "type": "info",
+                        "content": f"Thor: {len(images)} imagem(ns) na pasta de trabalho — a ler o enunciado…",
+                    })
             if images:
                 emit({"type": "info", "content": "Thor: a ler as imagens anexadas…"})
                 try:
@@ -856,8 +891,10 @@ class Handler(BaseHTTPRequestHandler):
                             task_text += f"\nPasso 1: {steps[0]}"
                         if vision_text:
                             task_text += (
-                                "\n\nConteúdo lido das imagens anexadas (transcrito "
-                                "pelo Thor — este TEXTO é o enunciado; implementa-o):\n"
+                                "\n\nConteúdo lido das imagens (anexadas ou da "
+                                "pasta de trabalho — transcrito pelo Thor; os "
+                                "JPEG originais NÃO se leem como texto): este "
+                                "TEXTO é o enunciado; implementa-o):\n"
                                 + vision_text
                             )
                         py = sys.executable
